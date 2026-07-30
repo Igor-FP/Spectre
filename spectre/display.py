@@ -83,14 +83,18 @@ class Stretch:
         GL_RGBA / GL_UNSIGNED_BYTE expects on a little-endian machine: R is the
         low byte.
         """
+        # Build the grey table first: that call is what refreshes `_lut_key` when
+        # the stretch has changed. Reading the key before it would compare against
+        # the previous stretch, hit the cache and freeze the display.
+        grey = self.lut(levels)
         key = (levels, saturation, self._lut_key)
         if self._rgba_key != key or self._rgba_lut is None:
-            grey = self.lut(levels).astype(np.uint32)
-            table = OPAQUE | grey | (grey << 8) | (grey << 16)
+            wide = grey.astype(np.uint32)
+            table = OPAQUE | wide | (wide << 8) | (wide << 16)
             if 0 <= saturation < levels:
                 table[saturation:] = SATURATED_COLOUR
             self._rgba_lut = table
-            self._rgba_key = (levels, saturation, self._lut_key)
+            self._rgba_key = key
         return self._rgba_lut
 
     def apply(self, data: np.ndarray) -> np.ndarray:
