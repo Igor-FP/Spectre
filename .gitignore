@@ -216,3 +216,19 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Spectre ---
+# Test frames captured from the camera (FITS/NumPy, tens of MB each)
+captures/
+*.fits
+*.fit
+*.npy
+
+# Local launcher
+main.bat
+
+# Local machine state: exposure, gain, crop, calibration, window layout
+settings.json
+
+# ZWO SDK binaries are not redistributed; asi_sdk.py looks for the DLL here
+lib/
