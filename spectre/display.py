@@ -7,6 +7,7 @@ values, and the result is uploaded as an 8-bit single-channel GL texture.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -24,17 +25,16 @@ OPAQUE = np.uint32(0xFF000000)
 SATURATED_COLOUR = np.uint32(0xFF0000FF)  # opaque red
 
 
-def saturation_value(bit_depth: int, dtype: np.dtype) -> int:
-    """The largest value this sensor can actually produce.
+#: A pixel this close to the top of the scale is treated as clipped. Deliberately
+#: a fraction and not the exact ceiling: a 12-bit ASI290MM never returns 4095, its
+#: highest value is 4094 (65504 after the shift into 16 bits), so a hard test
+#: against the theoretical maximum would never fire.
+SATURATION_FRACTION = 0.995
 
-    ZWO cameras with an ADC narrower than 16 bits return the value shifted left
-    into the top bits, so a clipped pixel of a 12-bit sensor reads 65520 rather
-    than 65535.
-    """
-    if np.dtype(dtype) == np.uint8:
-        return 255
-    depth = int(np.clip(bit_depth or 16, 8, 16))
-    return ((1 << depth) - 1) << (16 - depth)
+
+def saturation_value(full_scale: int) -> int:
+    """Lowest value counted as clipped, for a frame with this full scale."""
+    return int(math.ceil(full_scale * SATURATION_FRACTION))
 
 
 def mtf(x: np.ndarray, m: float) -> np.ndarray:
@@ -137,7 +137,7 @@ def frame_stats(
     flat = sample.ravel()
     lo_val, hi_val = np.percentile(flat, [lo_percentile, hi_percentile])
     hist, _ = np.histogram(flat, bins=256, range=(0, full_scale))
-    saturation_level = full_scale * 0.995
+    saturation_level = saturation_value(full_scale)
     return ImageStats(
         min_adu=int(flat.min()),
         max_adu=int(flat.max()),

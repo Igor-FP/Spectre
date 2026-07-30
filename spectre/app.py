@@ -332,8 +332,7 @@ class App:
         """Pixel value that means the sensor clipped, for this camera and format."""
         if self.frame is None:
             return 65535
-        depth = self.camera.bit_depth if self.camera is not None else 16
-        return display.saturation_value(depth, self.frame.data.dtype)
+        return display.saturation_value(self.frame.full_scale)
 
     def redraw_texture(self) -> None:
         """Re-apply the stretch to the current frame (after a stretch change)."""
