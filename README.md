@@ -1,251 +1,291 @@
 # Spectre
 
-Живой просмотр камеры спектрографа ZWO ASI (проверено на **ASI290MM**) и
-геометрическая калибровка спектра: 16-битное линейное изображение в реальном
-времени, экспозиция и усиление, кроп, поиск угла полосы спектра и наклона
-спектральных линий (shear), извлечение одномерного спектра.
+Spectre is the control program for a simple home-made spectrograph: a diffraction
+grating, whatever tube and mount you put it in, and one of the ZWO monochrome
+cameras. The optical layout does not matter - nothing in the program assumes a
+particular design, sensor size or camera model.
 
-Цель калибровки — **базис системы координат спектра**: два вектора, X вдоль оси
-длин волн и Y вдоль спектральных линий. Они не перпендикулярны друг другу
-(неидеальный поворот щели к решётке) и не перпендикулярны сторонам кадра
-(неидеально накрученная камера).
+The goal is to shoot spectra and calibrate them, compare spectra against each
+other, plot them, and save them as 1-D FITS with the calibration written into the
+header.
 
-Windows 10, Python 3.11+, pygame + Dear ImGui (OpenGL 3.3).
+Implemented so far:
+
+* **live view** of the camera - the raw 16-bit linear frame, in real time, with
+  exposure, gain, offset and USB bandwidth control, and a display stretch that
+  only affects what you see, never the data;
+* **crop** (region of interest) with draggable lines: a spectrograph throws glare
+  and the zero order across the sensor, and every measurement is done inside the
+  crop only;
+* **band geometry calibration** - the tilt of the spectrum band against the frame
+  axes, i.e. how the camera is rotated on the spectrograph, plus the band's
+  centre line and edges;
+* **shear calibration** - the direction of the spectral lines, i.e. the tilt of
+  the slit against the grating. Together with the band angle this gives the basis
+  of the spectrum coordinate system: two vectors, X along the wavelength axis and
+  Y along the spectral lines, neither perpendicular to the other nor to the frame
+  edges;
+* **1-D spectrum extraction** along that basis, shown as a strip and as a plot;
+* **saving frames** as 16-bit FITS (plus `.npy`) with exposure, gain, sensor
+  temperature, crop position and the calibration in the header, and **replaying**
+  a saved frame instead of a camera, so everything can be worked on without
+  hardware.
+
+Not there yet: the wavelength calibration itself (identifying known lines to get
+the zero point and the scale along X), comparing several spectra, and the 1-D
+FITS export.
+
+Windows 10, Python 3.11+, pygame + Dear ImGui over OpenGL 3.3.
 
 ```
-main.bat                                   # то же, что python main.py
-python main.py                             # первая найденная ASI-камера
-python main.py --file captures\name.fits    # воспроизвести сохранённый кадр
-python main.py --sim                       # синтетика, железо не нужно
-python main.py --list                      # список камер и выход
-python tools/probe_camera.py               # проверка камеры без GUI
+main.bat                                   # same as python main.py
+python main.py                             # first ASI camera found
+python main.py --file captures\name.fits   # replay a saved frame
+python main.py --sim                       # synthetic spectrum, no hardware
+python main.py --list                      # list cameras and exit
+python tools/probe_camera.py               # check the camera without a GUI
 ```
 
-Спецификации алгоритмов и накопленные грабли — в [docs/](docs/):
+Algorithm specs and accumulated traps live in [docs/](docs/):
 [TZ_BandAngle.md](docs/TZ_BandAngle.md), [TZ_Shear.md](docs/TZ_Shear.md),
 [TZ_Spectrum.md](docs/TZ_Spectrum.md), [KnowledgeBase.md](docs/KnowledgeBase.md).
 
-## Какой Python-биндинг ImGui
-
-**`imgui-bundle`** (`pip install imgui-bundle`) — он и используется здесь.
-
-* `pyimgui` (пакет `imgui`) заморожен на Dear ImGui 1.82 (2021) и почти не
-  развивается;
-* `imgui-bundle` живой, в нём Dear ImGui 1.92, ImPlot/ImPlot3D (пригодится для
-  графика спектра), docking, и — главное — готовый бэкенд для pygame:
-  `imgui_bundle.python_backends.pygame_backend`;
-* `dearpygui` — это не биндинг ImGui, а отдельный фреймворк со своим циклом
-  отрисовки, с pygame не совмещается.
-
-В комплекте с pygame ImGui рисуется через OpenGL, поэтому окно создаётся с
-флагами `OPENGL | DOUBLEBUF | RESIZABLE`, а кадр камеры выводится не через
-`pygame.surfarray`, а как GL-текстура внутри `imgui.image()`.
-
-Один нюанс: штатный `PygameRenderer` передаёт в ImGui только навигационные
-клавиши, из-за чего `imgui.is_key_pressed(imgui.Key.f)` никогда не срабатывает.
-В `spectre/imgui_backend.py` лежит `SpectreRenderer` — он мапит всю клавиатуру и
-при этом продолжает отдавать печатные символы в поля ввода. Повторы клавиш
-делает сам ImGui (`io.key_repeat_delay` / `io.key_repeat_rate`), поэтому ручной
-трекинг «зажатых» клавиш, как в `align.py`, здесь не нужен: одноразовые действия
-берут `is_key_pressed(key, repeat=False)`, повторяющиеся — `repeat=True`.
-
-## Установка
+## Install
 
 ```
 pip install -r requirements.txt
 ```
 
-Нужна `ASICamera2.dll` из ZWO ASI Camera SDK. Пути, которые проверяются по
-порядку (`spectre/asi_sdk.py`, `DEFAULT_DLL_PATHS`):
+`ASICamera2.dll` from the ZWO ASI Camera SDK is needed. Searched in this order
+(`spectre/asi_sdk.py`, `DEFAULT_DLL_PATHS`):
 
-1. переменная окружения `SPECTRE_ASI_DLL`;
-2. `<проект>/lib/ASICamera2.dll`;
-3. `C:\src\ZWOCameraSDK\lib\x64\ASICamera2.dll`  ← используется на этой машине;
+1. the `SPECTRE_ASI_DLL` environment variable;
+2. `<project>/lib/ASICamera2.dll`;
+3. `C:\src\ZWOCameraSDK\lib\x64\ASICamera2.dll`;
 4. `C:\Program Files\ASIStudio\ASICamera2.dll`;
-5. просто `ASICamera2.dll` где-нибудь в `PATH`.
+5. plain `ASICamera2.dll` somewhere on `PATH`.
 
-Явно задать можно так: `python main.py --dll "C:\путь\ASICamera2.dll"`.
+Or point at it directly: `python main.py --dll "C:\path\ASICamera2.dll"`.
 
-## Управление
+## Which Python ImGui binding
 
-| Клавиша | Действие |
+**`imgui-bundle`** (`pip install imgui-bundle`), and here is why:
+
+* `pyimgui` (the `imgui` package) is frozen on Dear ImGui 1.82 (2021) and barely
+  moves;
+* `imgui-bundle` is alive, carries Dear ImGui 1.92, ImPlot (useful for spectrum
+  plots later), docking, and - the point here - a ready pygame backend:
+  `imgui_bundle.python_backends.pygame_backend`;
+* `dearpygui` is not an ImGui binding but a separate framework with its own
+  render loop; it does not combine with pygame.
+
+With pygame, ImGui renders through OpenGL, so the window is created with
+`OPENGL | DOUBLEBUF | RESIZABLE` and the camera frame is not blitted through
+`pygame.surfarray` but uploaded as a GL texture inside `imgui.image()`.
+
+One catch: the stock `PygameRenderer` only forwards navigation keys to ImGui, so
+`imgui.is_key_pressed(imgui.Key.f)` never fires and application shortcuts are
+impossible. `spectre/imgui_backend.py` has `SpectreRenderer`, which maps the whole
+keyboard and still feeds printable characters to text fields. Key repeat is left
+to ImGui itself (`io.key_repeat_delay` / `io.key_repeat_rate`): one-shot actions
+use `is_key_pressed(key, repeat=False)`, repeating ones `repeat=True`.
+
+## Controls
+
+| Key | Action |
 |---|---|
-| `F` | вписать кадр в окно |
-| `1` | масштаб 100 % |
-| `+` / `-` | зум (с повтором) |
-| стрелки | панорама (с повтором, Shift — быстрее) |
-| колесо мыши | зум под курсором |
-| ЛКМ + движение | панорама |
-| `[` / `]` | экспозиция /1.25 и ×1.25 (Shift — /2 и ×2) |
-| `,` / `.` | усиление −5 / +5 (Shift — ±25) |
-| `Space` | пауза / продолжить |
-| `A` | авторастяжка вкл/выкл |
-| `B` | оверлей полосы спектра вкл/выкл |
-| `C` | полный кадр / только кроп |
-| `S` | сохранить кадр в `captures/` |
-| `H` | окно горячих клавиш |
-| `Esc` | выход |
+| `F` | fit the frame to the window |
+| `1` | 100 % zoom |
+| `+` / `-` | zoom in / out (repeats) |
+| arrows | pan (repeats, Shift = faster) |
+| mouse wheel | zoom at the cursor |
+| left drag | pan |
+| `[` / `]` | exposure / 1.25 or x 1.25 (Shift = /2, x2) |
+| `,` / `.` | gain -5 / +5 (Shift = +-25) |
+| `Space` | pause / resume |
+| `A` | auto stretch on / off |
+| `B` | band overlay on / off |
+| `C` | whole frame / crop only |
+| `S` | save the current frame into `captures/` |
+| `H` | shortcuts window |
+| `Esc` | quit |
 
-При наведении на изображение в строке состояния показываются координаты
-пикселя и его значение в ADU.
+Hovering the image shows the pixel coordinates and its value in ADU in the status
+line.
 
-## Как это устроено
+## How it is put together
 
 ```
-main.py                  окно, цикл событий, отрисовка
-spectre/asi_sdk.py       ctypes-обёртка ASICamera2.dll (по ASICamera2.h, SDK 1.21)
-spectre/camera.py        поток захвата, video/snap режимы, симулятор
-spectre/display.py       растяжка (LUT), статистика, GL-текстура
-spectre/imgui_backend.py pygame-бэкенд ImGui с полной клавиатурой
-spectre/calib.py         вся геометрия: угол полосы, shear, извлечение спектра
-spectre/frameio.py       сохранение и чтение кадров (FITS/.npy)
-spectre/app.py           состояние приложения, подключение, конвейер кадров
-spectre/ui.py            панели ImGui и обработка клавиш
-spectre/settings.py      settings.json (экспозиция, усиление, растяжка, вид)
-tools/probe_camera.py    диагностика камеры из консоли
+main.py                  window, event loop, CLI
+spectre/asi_sdk.py       ctypes binding of ASICamera2.dll (from ASICamera2.h, SDK 1.21)
+spectre/camera.py        grabber thread; AsiCamera (video/snap), FileCamera, SimulatedCamera
+spectre/display.py       display stretch (LUT), frame statistics, GL texture
+spectre/imgui_backend.py pygame backend for ImGui with the full keyboard mapped
+spectre/calib.py         all the geometry: band angle, shear, spectrum extraction
+spectre/frameio.py       saving and loading frames (FITS / .npy)
+spectre/app.py           application state, connection, frame pipeline
+spectre/ui.py            ImGui panels, overlays, keyboard
+spectre/settings.py      settings.json
+tools/probe_camera.py    camera diagnostics from the console
 ```
 
-Захват идёт в отдельном потоке; UI-поток никогда не вызывает SDK напрямую. Он
-кладёт изменения контролов в очередь (`camera.set_control`) и забирает
-последний готовый кадр (`camera.latest_frame`) — если UI не успевает, лишние
-кадры просто теряются, а не копятся.
+Capture runs in its own thread; the UI thread never calls the SDK. It queues
+control changes (`camera.set_control`) and picks up the newest finished frame
+(`camera.latest_frame`) - if the UI cannot keep up, spare frames are dropped
+rather than queued.
 
-Два режима захвата переключаются автоматически по экспозиции
-(`SNAP_THRESHOLD_US`, 1 с):
+Two capture modes switch automatically on the exposure (`SNAP_THRESHOLD_US`, 1 s):
 
-* **video** (`ASIStartVideoCapture` / `ASIGetVideoData`) — короткие выдержки;
-* **snap** (`ASIStartExposure` / `ASIGetDataAfterExp`) — длинные; в этом режиме
-  выдержка **прерывается**, если пользователь дёрнул ползунок, иначе на 30 с
-  экспозиции интерфейс казался бы зависшим. Прогресс виден в панели.
+* **video** (`ASIStartVideoCapture` / `ASIGetVideoData`) for short exposures;
+* **snap** (`ASIStartExposure` / `ASIGetDataAfterExp`) for long ones. In snap mode
+  a running exposure is **aborted** when a control changes, otherwise a 30 s
+  exposure would make the interface look frozen. Progress is shown in the panel.
 
-Данные камеры никак не трогаются: кадр остаётся `uint16` в линейной шкале, а на
-экран идёт результат таблицы соответствия (чёрная точка / белая точка / MTF —
-та же функция, что в `align.py`), загружаемый как однобайтовая GL-текстура
-(`GL_R8` + swizzle, с мип-уровнями, чтобы тонкие линии не исчезали при
-уменьшении).
+The camera data is never modified: the frame stays `uint16` on a linear scale, and
+what reaches the screen is the result of a lookup table (black point / white point
+/ midtone transfer function), uploaded as a single-byte GL texture (`GL_R8` plus a
+swizzle to grey, with mipmaps so that thin spectral lines do not vanish when the
+view is zoomed out).
 
-## Сохранение кадров и работа без камеры
+## Saving frames, and working without a camera
 
-Левая панель, раздел **Save frame** (клавиша `S`): текущий кадр пишется в
-`captures/` рядом с приложением — ровно как его отдала камера, линейный 16-битный,
-без растяжки. Форматы:
+Left panel, **Save frame** (or the `S` key): the current frame is written into
+`captures/` next to the app, exactly as the camera delivered it - linear, 16-bit,
+no stretch. By default the crop is saved, not the whole frame; there is a checkbox
+for the whole frame. Formats:
 
-* **FITS** — с заголовком: `EXPTIME`/`EXPUS`, `GAIN`, `OFFSET`, `XBINNING`,
-  `INSTRUME`, `CCD-TEMP`, `BITDEPTH`, `XPIXSZ`, границы кропа (`CROPX0`…`CROPY1`)
-  и, если калибровка сделана, её результат (`BANDANG`, `BANDCY`, `BANDW`,
-  `BANDLO`, `BANDHI`, `BANDREFX`);
-* **.npy** — сырой массив numpy, без заголовка.
+* **FITS** with a header: `EXPTIME` / `EXPUS`, `GAIN`, `OFFSET`, `XBINNING`,
+  `INSTRUME`, `CCD-TEMP`, `BITDEPTH`, `XPIXSZ`, the crop position on the sensor
+  (`CROPX0`...`CROPY1`) and, if the calibration has been done, its result
+  (`BANDANG`, `BANDCY`, `BANDW`, `BANDLO`, `BANDHI`, `BANDREFX`);
+* **.npy** - the raw numpy array, no header.
 
-Сохранённые кадры появляются в списке камер как `file: имя.fits` и
-воспроизводятся вместо камеры (`FileCamera`): картинка, экспозиция и gain берутся
-из файла, органы управления экспозицией скрыты, всё остальное — кроп, растяжка,
-калибровка — работает как на живом кадре. Чтобы переключиться: `Disconnect` →
-`Refresh list` → выбрать файл → `Connect`. Из командной строки:
-`python main.py --file captures\имя.fits`.
+Saved frames appear in the camera list as `file: name.fits` and are played back
+instead of a camera (`FileCamera`): the image, exposure and gain come from the
+file, the exposure controls are hidden, and everything else - crop, stretch,
+calibration, spectrum - works as on a live frame. To switch: `Disconnect` ->
+`Refresh list` -> pick the file -> `Connect`. From the command line:
+`python main.py --file captures\name.fits`.
 
-Симулятор (`--sim`) остаётся в списке последним и сам никогда не выбирается. Он
-не воспроизводит реальную картину спектрографа (равномерное заполнение полосы,
-полная ширина кадра, нет фонового свечения) и годится только для отладки кода.
+The simulator (`--sim`) sits last in the camera list and is never selected on its
+own. It does not reproduce what a real spectrograph looks like (uniform band, full
+frame width, no glare) and is only good for checking that the code runs and the UI
+draws.
 
-## Кроп (область интереса)
+## Crop (region of interest)
 
-Правая панель, раздел **Crop**. Все алгоритмы по спектру работают строго внутри
-кропа; результаты пересчитываются в координаты полного кадра.
+Right panel, **Crop**. Every spectrum algorithm works strictly inside the crop;
+results are converted back to full-frame coordinates.
 
-* галочка **Show full frame** (клавиша `C`) — полный кадр с четырьмя
-  перетаскиваемыми **красными линиями** кропа, снаружи кроп затемнён;
-* галочка снята — на экране только кроп;
-* границы можно задать и ползунками, есть кнопка сброса на весь кадр;
-* кроп сохраняется в `settings.json`.
+* **Show full frame** (key `C`) - the whole frame with four draggable **red
+  lines**, everything outside the crop dimmed;
+* unchecked - only the crop is shown;
+* the bounds can also be typed with the sliders, and there is a reset button;
+* the crop is saved in `settings.json`.
 
-## Калибровка: угол полосы
+Statistics, the histogram and the auto stretch are measured inside the crop too:
+letting the glare and the zero order set the display levels, or the numbers you
+read off the panel, is worse than useless.
 
-Правая панель, раздел **Band angle**. Реализовано по
+## Calibration: the band angle
+
+Right panel, **Band angle**. Implemented as specified in
 [docs/TZ_BandAngle.md](docs/TZ_BandAngle.md):
 
-1. кадр паузится, кроп сканируется сверху вниз, по одной сканирующей линии на
-   строку (шаг 1 px), но линии не по оси X, а с наклоном: линия номер `Y` выходит
-   из точки (0, Y) на левом краю кропа и имеет наклон `dy/dx = tan(L)`;
-2. для каждого угла `L` от −10° до +10° с шагом 0.01° берётся **среднее
-   арифметическое** всех пикселей вдоль линии → `массив[L][Y]`, одномерная
-   проекция изображения. Именно среднее, а не медиана: спектр занимает лишь часть
-   ширины, и среднее всё равно даёт выброс;
-3. в каждой проекции берутся перцентили 0.1 и 99.9 % и уровень на **25 %** между
-   ними; от максимума проекции наружу ищутся два пересечения этого уровня —
-   расстояние между ними есть ширина выброса (пересечения субпиксельные);
-4. массив ширин по углам фильтруется гауссом окном 5 отсчётов, берётся минимум.
-   Его угол — направление спектра, а два пересечения на этом угле — границы
-   полосы.
+1. capture is paused and the crop is scanned top to bottom, one scan line per row
+   (1 px steps), but the lines do not run along X - they are tilted: line number
+   `Y` starts at (0, Y) on the left edge of the crop with slope `dy/dx = tan(L)`;
+2. for every angle `L` from -10 to +10 degrees in 0.01 degree steps, the
+   **arithmetic mean** of all pixels along the line is taken, giving
+   `array[L][Y]` - a 1-D projection of the image. The mean, not a median: the
+   spectrum covers only part of the width, and the mean still shows it as a bump;
+3. in each projection the 0.1 % and 99.9 % percentiles are taken and a level
+   **25 %** of the way between them; the two crossings of that level are found
+   outwards from the peak of the projection, and the distance between them is the
+   width of the bump (crossings are sub-pixel);
+4. the width-versus-angle array is Gaussian-filtered (5 samples) and its minimum
+   taken. That angle is the direction of the spectrum, and the two crossings at
+   that angle are the edges of the band.
 
-Границы и осевая линия рисуются поверх изображения (в текстуру не пишется
-ничего), клавиша `B`. В разделе **Curves** — кривая ширины от угла до и после
-фильтрации, проекция на найденном угле и размах кривой: по размаху сразу видно,
-насколько выражен минимум на конкретном кадре.
+The edges and the centre line are drawn over the image (never into the texture),
+key `B`. **Curves** shows the width curve before and after filtering, the
+projection at the chosen angle, and the range the curve covers - the range tells
+you at a glance how pronounced the minimum is on this particular frame.
 
-Два момента, которые стоит знать при работе:
+Two things worth knowing in use:
 
-* пересечения ищутся **от максимума наружу**, а не от краёв массива — иначе
-  паразитная засветка (нулевой порядок, дуга) тоже пересекает уровень, и меряется
-  расстояние до неё, а не ширина полосы. Именно это давало зависимость ответа от
-  положения линии кропа вплоть до переворота знака;
-* уровень 25 %, а не середина: у полосы с плоской вершиной точки половины
-  максимума почти не смещаются при размытии кромок, и кривая ширины получается
-  плоской.
+* the crossings are searched **outwards from the peak**, not inwards from the ends
+  of the array. Otherwise stray light (the zero order, a reflection arc) crosses
+  the level too and what gets measured is the distance to it rather than the width
+  of the band - which made the answer depend on where the crop line was, down to
+  flipping the sign of the angle;
+* the level is 25 %, not the midpoint: for a band with a flat top the
+  half-maximum points barely move when the edges blur, so the width curve comes
+  out flat and the minimum is picked by noise.
 
-Кроп должен быть достаточно высоким: наклон на `L` отнимает от проекции
-`ширина_кропа · tan(L)` строк, и полоса плюс фон должны в остаток влезать. Иначе
-на больших углах фона не остаётся, и кривая улетает вверх у краёв.
+The crop has to be tall enough: a tilt of `L` costs the projection
+`crop_width * tan(L)` rows, and the band plus some background has to fit in what
+is left. Otherwise the large angles have no background left and the curve shoots
+up at its ends.
 
-## Калибровка: shear и базис
+## Calibration: shear and the basis
 
-Правая панель, раздел **Shear: spectrum basis**, кнопка `Find shear` (нужен уже
-найденный угол полосы). Реализовано по [docs/TZ_Shear.md](docs/TZ_Shear.md):
-перебираются наклоны линий от −10° до +10° шагом 0.05°, для каждого строится
-одномерная проекция вдоль оси длин волн — пиксели складываются по ширине полосы
-вдоль пробного направления и делятся на число сложенных. Резкость проекции
-считается как RMS разности двух гауссовых блюров (масштабы 1 и 4, помноженные на
-единственный параметр `blur scale`); максимум резкости и даёт направление
-спектральных линий.
+Right panel, **Shear: spectrum basis**, button `Find shear` (the band angle has to
+be measured first). Implemented as specified in
+[docs/TZ_Shear.md](docs/TZ_Shear.md): line directions from -10 to +10 degrees are
+tried in 0.05 degree steps, and for each one a 1-D projection along the wavelength
+axis is built - pixels are summed across the band width along the trial direction
+and divided by how many were summed. The sharpness of a projection is the RMS of
+the difference of two Gaussian blurs (scales 1 and 4, times the single
+`blur scale` parameter); the sharpest projection gives the direction of the
+spectral lines.
 
-Результат: наклон линий от оси Y, shear как отклонение от перпендикулярности,
-`du/dv` (насколько уезжает координата длины волны на пиксель поперёк полосы) и сам
-базис — два единичных вектора в координатах кадра. Показывается кривая
-резкости от наклона.
+The result: the tilt of the lines against the frame Y axis, the shear as the
+departure from perpendicularity, `du/dv` (how far the wavelength coordinate slides
+per pixel across the band), and the basis itself - two unit vectors in frame
+coordinates. The sharpness curve is shown next to it.
 
-Поперёк полосы рисуются девять **пунктирных** полупрозрачных линий по найденному
-направлению — видно, что нашёл алгоритм, и при этом спектр под ними не закрыт.
-Появляются только после `Find shear`; `Find band` и `Clear calibration` их
-сбрасывают, потому что shear измеряется относительно полосы.
+Nine **dashed** semi-transparent lines are drawn across the band along the found
+direction: you can see what the search settled on, and the spectrum underneath
+stays visible. They appear only after `Find shear`; `Find band` and
+`Clear calibration` reset them, because the shear is measured relative to the
+band.
 
-Точность здесь принципиально ниже, чем у угла полосы: плечо — ширина полосы, а не
-её длина, поэтому один пиксель смаза при ширине 125 px это уже ~0.45°.
+Accuracy here is inherently lower than for the band angle: the lever arm is the
+width of the band, not its length, so at a width of 125 px one pixel of smear is
+already about 0.45 degrees.
 
-## Извлечение спектра
+## Extracting the spectrum
 
-Кнопка **Capture Spectra** (активна, когда измерены и угол полосы, и shear)
-открывает окно под превью. Реализовано по
-[docs/TZ_Spectrum.md](docs/TZ_Spectrum.md): идём по оси длин волн и для каждой
-позиции усредняем все пиксели между границами полосы вдоль вектора спектральных
-линий; концы, где линия пересекает полосу не полностью, отбрасываются.
+**Capture Spectra** (enabled once both the band angle and the shear are measured)
+opens a window under the preview. Implemented as specified in
+[docs/TZ_Spectrum.md](docs/TZ_Spectrum.md): the wavelength axis is walked and, at
+every position, all pixels between the band edges are averaged along the
+spectral-line vector; the ends, where a line does not fully cross the band, are
+dropped.
 
-В окне сверху прямоугольник, где яркость точки равна значению спектра (высота по
-умолчанию 1/20 от ширины, тянется мышью за полоску под ним), под ним тот же спектр
-графиком. Обозначений на оси X пока нет — нет калибровки длин волн. Высота самого
-окна тянется за полоску на его верхней границе. Пока окно открыто, спектр
-пересчитывается на каждом новом кадре.
+The window shows a strip in which the brightness of a point is the value of the
+spectrum (its height defaults to 1/20 of its width and can be dragged by the
+handle underneath), and below it the same spectrum as a plot. There are no labels
+on the X axis yet - there is no wavelength calibration. The height of the window
+itself is dragged by the handle on its top edge. While the window is open the
+spectrum is re-extracted from every new frame.
 
-## Замечания по железу (проверено на этой машине)
+## Hardware notes (measured on this machine)
 
-* **RAW16 у ASI290MM — это 12 бит, сдвинутые влево на 4.** Значения кратны 16,
-  полная шкала — 65535 (`tools/probe_camera.py` печатает «value step 16»).
-  Поэтому нормировка на 65535 корректна, а реальных уровней 4096.
-* **Камера сейчас включена в порт USB 2.0** (`IsUSB3Host = False`): полный кадр
-  RAW16 идёт ~8 fps (≈35 МБ/с), RAW8 — ~16 fps. На USB 3.0 будет в несколько раз
-  больше. Бининг не помогает: у 290MM он программный, по USB всё равно едет
-  полный кадр.
-* `bandwidth` (ASI_BANDWIDTHOVERLOAD) и `high_speed` — в разделе Advanced.
+* **RAW16 from an ASI290MM is 12-bit data shifted left by 4.** Values are
+  multiples of 16 and full scale is 65535 (`tools/probe_camera.py` prints "value
+  step 16"), so normalising by 65535 is right and there are 4096 real levels.
+* The camera here is plugged into a **USB 2.0 port** (`IsUSB3Host = False`):
+  full-frame RAW16 runs at ~8 fps (~35 MB/s), RAW8 at ~16 fps. On USB 3.0 it will
+  be several times faster. Binning does not help: on a 290MM it is done in
+  software, the full frame still crosses the bus.
+* `bandwidth` (ASI_BANDWIDTHOVERLOAD) and `high_speed` are under Advanced.
+* Nothing in the program is model-specific: resolution, control ranges, pixel
+  size, bit depth and the supported formats all come from the SDK. Colour cameras
+  would need debayering, which is not implemented - hence "monochrome".
 
-## Дальше
+## Next
 
-Следующий этап — отождествление линий солнечного спектра: нулевая точка оси X на
-экране и масштаб по X, то есть привязка спектра к длинам волн.
+Identifying lines in the solar spectrum: the zero point of the X axis on screen
+and the scale along X, i.e. tying the spectrum to wavelength.

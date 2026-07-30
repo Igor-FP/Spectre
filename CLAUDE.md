@@ -42,16 +42,25 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## What this is
 
-A live viewer and geometry-calibration tool for a spectrograph built around a
-**ZWO ASI290MM** camera (mono, 1936x1096, 12-bit ADC, USB3 camera). Windows 10,
-Python 3.11, pygame + Dear ImGui (`imgui-bundle`) over OpenGL 3.3.
+The control program for a simple home-made spectrograph: a diffraction grating,
+whatever tube it is built into, and one of the ZWO monochrome cameras. The optical
+layout does not matter and nothing in the code is model-specific.
 
-The point of the calibration chain is the **basis of the spectrum coordinate
-system**: two vectors, X along the wavelength axis and Y along the spectral
-lines. They are not perpendicular to each other (the slit and the grating are
-not exactly aligned) and not perpendicular to the frame edges (the camera is not
-screwed on perfectly). Next stage, not implemented: identifying lines in the
-solar spectrum to get the zero point and the scale along X.
+**What the program is for:** shooting spectra and calibrating them, comparing
+spectra against each other, plotting them, and saving them as 1-D FITS with the
+calibration in the header.
+
+Two of the calibration steps - the band angle and the shear - exist for exactly
+one purpose: to produce the **basis of the spectrum coordinate system**, two
+vectors, X along the wavelength axis and Y along the spectral lines, neither
+perpendicular to the other (the slit and the grating are not exactly aligned) nor
+to the frame edges (the camera is not screwed on perfectly). That basis is what
+the spectrum is extracted along. The step after it, not implemented: identifying
+known lines to get the zero point and the scale along X, i.e. the wavelength
+calibration itself.
+
+Windows 10, Python 3.11, pygame + Dear ImGui (`imgui-bundle`) over OpenGL 3.3.
+Developed against an **ASI290MM** (mono, 1936x1096, 12-bit ADC).
 
 ## File map
 
