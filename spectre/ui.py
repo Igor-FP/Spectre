@@ -215,21 +215,31 @@ def _acquisition_section(app: App) -> None:
     rng = app.control_range(EXPOSURE)
     if rng is not None:
         exposure_us = app.control_value(EXPOSURE, 20_000)
-        lo_ms = max(rng.min_value / 1000.0, 0.001)
-        hi_ms = min(rng.max_value / 1000.0, 60_000.0)  # 60 s on the slider
         ms = exposure_us / 1000.0
-        imgui.text(f"Exposure   ({exposure_us} us)")
+        imgui.text(f"Exposure   {_exposure_text(ms)}   ({exposure_us} us)")
         imgui.set_next_item_width(-1)
-        changed, ms = imgui.slider_float(
+        # The slider carries a plain 0..1 position and the mapping is ours, so the
+        # scale is fixed once and for all - nothing rescales it, the buttons below
+        # only set a value. (ImGui derives the rounding, and part of a logarithmic
+        # slider's mapping, from the format string, so a format that changed with
+        # the value used to make the scale jump under the cursor.) The label is
+        # passed as a literal format string, and typing is done in the field below.
+        changed, position = imgui.slider_float(
             "##exposure",
-            float(np.clip(ms, lo_ms, hi_ms)),
-            lo_ms,
-            hi_ms,
-            _exposure_format(ms),
-            imgui.SliderFlags_.logarithmic,
+            _exposure_to_slider(ms),
+            0.0,
+            1.0,
+            _exposure_text(ms),
+            # The label is a literal string, so there is nothing for ImGui to
+            # round the value to; it skips that step by itself when the format
+            # holds no '%', and the flag says so explicitly instead of relying on
+            # it. no_input because ctrl+click would try to type into that label -
+            # exact values go into the microsecond field below.
+            imgui.SliderFlags_.no_input | imgui.SliderFlags_.no_round_to_format,
         )
         if changed:
-            app.set_control(EXPOSURE, max(rng.min_value, int(round(ms * 1000.0))))
+            wanted = int(round(_slider_to_exposure(position) * 1000.0))
+            app.set_control(EXPOSURE, int(np.clip(wanted, rng.min_value, rng.max_value)))
 
         spacing = imgui.get_style().item_spacing.x
         button_w = (imgui.get_content_region_avail().x - 4 * spacing) / 5.0
@@ -314,12 +324,45 @@ def _acquisition_section(app: App) -> None:
     imgui.spacing()
 
 
-def _exposure_format(ms: float) -> str:
+#: The exposure slider: 1 ms at the left edge, 1 s exactly in the middle, 10
+#: minutes at the right. Each half is logarithmic on its own, because a single
+#: logarithmic scale always puts sqrt(min*max) in the middle - 775 ms here - and
+#: no choice of base changes that, the base cancels. The two halves span 3.00 and
+#: 2.78 decades, so the kink at the middle is not noticeable.
+EXPOSURE_SLIDER_MIN_MS = 1.0
+EXPOSURE_SLIDER_MID_MS = 1000.0
+EXPOSURE_SLIDER_MAX_MS = 600_000.0
+
+
+def _exposure_to_slider(ms: float) -> float:
+    """Exposure in milliseconds -> slider position in 0..1."""
+    ms = float(np.clip(ms, EXPOSURE_SLIDER_MIN_MS, EXPOSURE_SLIDER_MAX_MS))
+    if ms <= EXPOSURE_SLIDER_MID_MS:
+        span = math.log(EXPOSURE_SLIDER_MID_MS / EXPOSURE_SLIDER_MIN_MS)
+        return 0.5 * math.log(ms / EXPOSURE_SLIDER_MIN_MS) / span
+    span = math.log(EXPOSURE_SLIDER_MAX_MS / EXPOSURE_SLIDER_MID_MS)
+    return 0.5 + 0.5 * math.log(ms / EXPOSURE_SLIDER_MID_MS) / span
+
+
+def _slider_to_exposure(position: float) -> float:
+    """Slider position in 0..1 -> exposure in milliseconds."""
+    position = float(np.clip(position, 0.0, 1.0))
+    if position <= 0.5:
+        ratio = EXPOSURE_SLIDER_MID_MS / EXPOSURE_SLIDER_MIN_MS
+        return EXPOSURE_SLIDER_MIN_MS * ratio ** (position / 0.5)
+    ratio = EXPOSURE_SLIDER_MAX_MS / EXPOSURE_SLIDER_MID_MS
+    return EXPOSURE_SLIDER_MID_MS * ratio ** ((position - 0.5) / 0.5)
+
+
+def _exposure_text(ms: float) -> str:
+    """The exposure in whichever unit reads best, for the label above the slider."""
     if ms < 1.0:
-        return "%.3f ms"
-    if ms < 100.0:
-        return "%.2f ms"
-    return "%.0f ms"
+        return f"{ms * 1000.0:.0f} us"
+    if ms < 1000.0:
+        return f"{ms:.4g} ms"
+    if ms < 60_000.0:
+        return f"{ms / 1000.0:.4g} s"
+    return f"{ms / 60_000.0:.4g} min"
 
 
 def _display_section(app: App) -> None:
