@@ -320,17 +320,27 @@ class App:
         )
         if self.stretch.auto:
             self.stretch.autoscale(self.stats)
-        self.texture.update(self.stretch.apply(frame.data))
+        self.texture.update(self.stretch.apply_rgba(frame.data, self.saturation_value))
         self._stats_crop = tuple(self.crop)
         self.update_spectrum()
         self.displayed_frames += 1
         self.display_ms = (time.perf_counter() - started) * 1000.0
         return True
 
+    @property
+    def saturation_value(self) -> int:
+        """Pixel value that means the sensor clipped, for this camera and format."""
+        if self.frame is None:
+            return 65535
+        depth = self.camera.bit_depth if self.camera is not None else 16
+        return display.saturation_value(depth, self.frame.data.dtype)
+
     def redraw_texture(self) -> None:
         """Re-apply the stretch to the current frame (after a stretch change)."""
         if self.frame is not None:
-            self.texture.update(self.stretch.apply(self.frame.data))
+            self.texture.update(
+                self.stretch.apply_rgba(self.frame.data, self.saturation_value)
+            )
 
     # -- saving frames -----------------------------------------------------
 
