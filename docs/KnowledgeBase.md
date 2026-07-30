@@ -89,8 +89,8 @@ Every item here was measured on the frames in `captures/`.
   drawn on it were wrong twice. Use it only to check that code runs and that the
   UI draws.
 * **Do not compare angles between frames as a measure of repeatability** unless
-  it is known that nothing but the code changed: Igor moves the camera and the
-  source deliberately, so that the solution does not only work at one angle.
+  it is known that nothing but the code changed: the camera and the source get
+  moved deliberately, so that the solution does not only work at one angle.
 * Real illumination along the slit is not constant, so the band is not uniform
   along its length, while its edges stay sharp. That is why the width of the
   projection tolerates the non-uniformity and metrics based on structure *along*
@@ -98,9 +98,8 @@ Every item here was measured on the frames in `captures/`.
 
 ## Environment
 
-* Windows Python is at
-  `C:\Users\Igor\AppData\Local\Programs\Python\Python311\python.exe` and can be
-  run from WSL directly; a pygame/OpenGL window opens on the Windows desktop.
+* Windows Python can be run from WSL directly (the exact path is in
+  `CLAUDE.local.md`); a pygame/OpenGL window opens on the Windows desktop.
 * A Linux environment variable does **not** reach a Windows process started from
   WSL unless it is listed in `WSLENV`. `SPECTRE_SETTINGS` therefore did not work
   that way; copy `settings.json` aside and restore it instead.

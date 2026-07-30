@@ -2,23 +2,29 @@
 
 Guidance for Claude Code (claude.ai/code) when working in this repository.
 
+**Read `CLAUDE.local.md` first.** It holds additional instructions that take
+priority over this file. It is not tracked by git.
+
 ## Working rules - read first
 
 * **No changes to code or to a spec without asking.** Ideas for improvement are
   welcome, but as words: describe the idea, wait for explicit consent, only then
   implement. Do not "improve" a specified algorithm on the way past it, do not
   add guards, options or heuristics that were not asked for.
-* **The spec is Igor's.** When he describes an algorithm, implement exactly that,
-  including the details that look redundant - they are usually there for a reason
-  that comes from the optics of the instrument. If a measurement contradicts the
-  spec, report the measurement and the numbers, then wait.
+* **The spec belongs to the project owner.** When an algorithm is described,
+  implement exactly that, including the details that look redundant - they are
+  usually there for a reason that comes from the optics of the instrument. If a
+  measurement contradicts the spec, report the measurement and the numbers, then
+  wait.
 * **Do not touch the real camera on your own initiative.** The spectrograph is
   physical hardware that is often half-assembled. Verify with `--sim`, or offline
   on the saved frames in `captures/`. Ask before any run that opens the camera,
   and say which command it would be.
-* **Do not touch `settings.json`.** It is Igor's live state (exposure, gain,
+* **Do not touch `settings.json`.** It is the local live state (exposure, gain,
   crop, calibration). If a test run needs different settings, copy the file
   aside and put it back afterwards.
+* **Never commit personal data, credentials or tokens** - in the files, in the
+  commit message or in the commit identity - without explicit permission.
 * Language: discussion in Russian; code comments and CLI documentation in
   English.
 * **ASCII-only in `.py` and `.bat`.** Not in output, not in comments, not in
@@ -82,7 +88,7 @@ captures/                frames saved by the S key / Save frame
 ## Run
 
 ```
-main.bat                       # what Igor uses
+main.bat                       # local launcher
 python main.py                 # connect to the first ASI camera
 python main.py --sim           # synthetic spectrum, no hardware
 python main.py --file captures\name.fits   # replay a saved frame
@@ -95,7 +101,7 @@ restoring them from `settings.json`. `--screenshot PATH.png` renders N frames an
 saves the window - the only way to see the UI without a display.
 
 `SPECTRE_SETTINGS=<path>` moves the settings file, so a test run does not touch
-Igor's. Note: a Linux environment variable does **not** reach a Windows process
+the real one. Note: a Linux environment variable does **not** reach a Windows process
 launched from WSL unless it is listed in `WSLENV`; backing up `settings.json` is
 the reliable way.
 
@@ -104,11 +110,10 @@ the reliable way.
 * **RAW16 from an ASI290MM is 12-bit data shifted left by 4**: values are
   multiples of 16, full scale is 65535, so there are 4096 real levels.
   `tools/probe_camera.py` prints the step.
-* The camera is on a **USB 2.0 port** on this machine (`IsUSB3Host = False`):
-  full-frame RAW16 runs at ~8.2 fps (~35 MB/s), RAW8 at ~16 fps. Binning does
-  not help - on a 290MM it is software binning, the full frame still crosses the
-  bus.
+* Throughput is limited by the USB link, not the sensor: on a USB 2.0 port
+  (`IsUSB3Host = False`) a full-frame RAW16 runs at ~8 fps (~35 MB/s), RAW8 at
+  ~16 fps. Binning does not help - on a 290MM it is software binning, the full
+  frame still crosses the bus.
 * Control values (exposure, gain, offset, bandwidth) **live in the camera** and
   persist between sessions. The app must not overwrite them silently.
-* `ASICamera2.dll` search order is in `spectre/asi_sdk.py::DEFAULT_DLL_PATHS`;
-  on this machine it is `C:\src\ZWOCameraSDK\lib\x64\ASICamera2.dll`.
+* `ASICamera2.dll` search order is in `spectre/asi_sdk.py::DEFAULT_DLL_PATHS`.

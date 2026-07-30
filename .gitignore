@@ -230,5 +230,8 @@ main.bat
 # Local machine state: exposure, gain, crop, calibration, window layout
 settings.json
 
+# Priority local instructions, never published
+CLAUDE.local.md
+
 # ZWO SDK binaries are not redistributed; asi_sdk.py looks for the DLL here
 lib/
