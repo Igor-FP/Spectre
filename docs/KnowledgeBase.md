@@ -106,3 +106,27 @@ Every item here was measured on the frames in `captures/`.
 * `--screenshot PATH.png` + `--screenshot-after N` is the only way to see the UI
   from here. Reading the PNG back shows geometry and panel text reliably; fine
   pixel detail and exact curve values are not readable.
+* There is no numpy in the WSL python; anything that imports `spectre` has to run
+  under the Windows interpreter (path in `CLAUDE.local.md`). It reaches WSL files
+  through `\\wsl.localhost\<distro>\...`, so a test script can live in a scratch
+  directory outside the repository.
+
+## Reference solar spectrum
+
+* **BASS2000 caps one request at 1000 A**, so 300-1000 nm takes seven of them.
+  Neighbouring chunks repeat their shared end point - deduplicate by wavelength.
+  `resol` is the output step in angstroms and the server resamples to it.
+* **The response is UTF-8, not ASCII**: the hydrogen labels come as `Halpha`,
+  `Hbeta`... spelled with real Greek letters, and G-prime with a real prime.
+  Decoding the body as ASCII destroys them before they can be transliterated -
+  decode UTF-8 first, spell out afterwards.  `tools/fetch_reference.py` does it.
+* The atlas grid is 0.1 nm, roughly a quarter of one pixel of this spectrograph.
+  Blur it in wavelength first (that is where the instrument resolution lives),
+  and linear interpolation onto our columns costs nothing after that.
+* Blurring the file and measuring the depth of H-alpha from the local continuum
+  gives 68 % unblurred, 31.5 % at FWHM 1 nm, 19.5 % at 2 nm, 13.8 % at 3 nm -
+  which matches the anchor table in `docs/TZ_Wavelength.md`, measured separately.
+* **The reference strip locates a line only to +-0.5 px**: it is resampled onto
+  our columns, so its minimum snaps to a column. At 0.57 nm/px that is 0.28 nm.
+  Nothing to fix - it is the click precision, and the reason the fit wants
+  several points rather than two good ones.

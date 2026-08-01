@@ -41,6 +41,8 @@ priority over this file. It is not tracked by git.
 * `docs/TZ_Shear.md` - **spec** for the shear search (slit tilt, the Y axis of
   the spectrum basis).
 * `docs/TZ_Spectrum.md` - **spec** for extracting the 1-D spectrum.
+* `docs/TZ_Wavelength.md` - **spec** for the wavelength calibration: reference
+  solar spectrum, anchor points, X -> wavelength.
 * `docs/KnowledgeBase.md` - **accumulated facts and traps**, append-only. Read
   before touching the geometry code: it lists the variants that were tried on
   real frames and why they failed.
@@ -77,11 +79,15 @@ spectre/camera.py        grabber thread; AsiCamera (video/snap), FileCamera, Sim
 spectre/display.py       display stretch (LUT), frame statistics, GL texture
 spectre/imgui_backend.py pygame backend for ImGui with the full keyboard mapped
 spectre/calib.py         ALL geometry: band angle, shear, spectrum extraction
+spectre/reference.py     reference solar spectrum: blur, resample into our pixels
+spectre/wavelength.py    anchor points and the X -> wavelength polynomial
 spectre/frameio.py       saving and loading frames (FITS + .npy)
 spectre/app.py           application state, connection, frame pipeline
 spectre/ui.py            ImGui panels, overlays, keyboard
 spectre/settings.py      settings.json
 tools/probe_camera.py    camera diagnostics from the console
+tools/fetch_reference.py downloads data/solar_reference.csv from BASS2000
+data/solar_reference.csv reference solar spectrum, 300-1000 nm at 0.1 nm
 captures/                frames saved by the S key / Save frame
 ```
 

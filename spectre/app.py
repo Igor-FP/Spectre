@@ -10,7 +10,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from . import asi_sdk, calib, camera as cam, display, frameio
+from . import asi_sdk, calib, camera as cam, display, frameio, reference, wavelength
 from .asi_sdk import ImgType
 from .camera import BANDWIDTH, EXPOSURE, GAIN, HIGH_SPEED, OFFSET
 from .settings import Settings
@@ -146,6 +146,28 @@ class App:
         self.spectrum_height = settings.spectrum_height
         self.strip_ratio = settings.spectrum_strip_ratio
         self.spectrum_status = ""
+
+        # wavelength calibration: the reference strip under ours, and the points
+        self.reference = reference.load()
+        self.reference_texture = display.ImageTexture()
+        self.show_reference = settings.show_reference
+        self.reference_blur_nm = settings.reference_blur_nm
+        self.reference_from_nm = settings.reference_from_nm
+        self.reference_to_nm = settings.reference_to_nm
+        self.max_degree = settings.wavelength_max_degree
+        self.anchors = wavelength.anchors_from_settings(settings.wavelength_anchors)
+        self.solution: Optional[wavelength.Solution] = wavelength.from_settings(
+            settings.wavelength_coefficients,
+            settings.wavelength_x_ref,
+            settings.wavelength_x_scale,
+        )
+        #: Half of an identification: one side has been clicked, waiting for the
+        #: other.  Either order works.
+        self.pending_x: Optional[float] = None
+        self.pending_nm: Optional[float] = None
+        self.pending_ref_x: Optional[float] = None  # where that wavelength was clicked
+        self.wavelength_status = ""
+        self._solved_span = None  # spectrum span the current solution was made for
 
         # saving frames
         self.save_fits = settings.save_fits
@@ -552,6 +574,136 @@ class App:
         self.spectrum_texture.update(
             np.ascontiguousarray(scaled.astype(np.uint8)).reshape(1, -1)
         )
+        self.refresh_wavelength(force=False)
+
+    # -- wavelength calibration --------------------------------------------
+
+    def spectrum_span(self):
+        """(first, last) full-frame column the spectrum covers, or None."""
+        spectrum = self.spectrum
+        if spectrum is None or not spectrum.ok or spectrum.length < 2:
+            return None
+        first = self.crop[0] + spectrum.first_column
+        return first, first + spectrum.length - 1
+
+    def x_of_index(self, index: float) -> float:
+        """Full-frame column of a sample of the extracted spectrum."""
+        span = self.spectrum_span()
+        return (span[0] + float(index)) if span is not None else float(index)
+
+    def index_of_x(self, x_px: float) -> float:
+        span = self.spectrum_span()
+        return (float(x_px) - span[0]) if span is not None else float(x_px)
+
+    def refresh_wavelength(self, force: bool = True) -> None:
+        """Re-fit the mapping and redraw the reference strip.
+
+        Called with `force` when something the user touched changed, and without
+        it on every new frame, where only a changed spectrum span matters.
+        """
+        span = self.spectrum_span()
+        if span is None:
+            return
+        if force or span != self._solved_span:
+            self.solution = wavelength.solve(
+                self.anchors,
+                span[0],
+                span[1],
+                self.reference_from_nm,
+                self.reference_to_nm,
+                self.max_degree,
+            )
+            self._solved_span = span
+            self.wavelength_status = "" if self.solution.ok else self.solution.message
+            self._store_solution()
+        self.update_reference_strip()
+
+    def update_reference_strip(self) -> None:
+        """Resample the reference into our pixels and upload it as a strip.
+
+        Our spectrum is never touched: the reference is evaluated at the
+        wavelength each of our columns maps to, so both strips share one X axis
+        and the lines line up vertically when the calibration is right.
+        """
+        spectrum = self.spectrum
+        solution = self.solution
+        if spectrum is None or solution is None or not solution.ok or not self.reference.ok:
+            return
+        wavelengths = solution.lambda_of_x(
+            np.arange(spectrum.length, dtype=np.float64) + self.x_of_index(0)
+        )
+        values = self.reference.sample(wavelengths, self.reference_blur_nm)
+        inside = np.isfinite(values)
+        scaled = np.zeros(values.shape, dtype=np.float32)  # off the atlas: black
+        if inside.any():
+            low = float(values[inside].min())
+            high = float(values[inside].max())
+            span = high - low
+            if span > 0:
+                scaled[inside] = (values[inside] - low) * (255.0 / span)
+        self.reference_texture.update(
+            np.ascontiguousarray(scaled.astype(np.uint8)).reshape(1, -1)
+        )
+
+    def wavelength_at(self, x_px: float) -> Optional[float]:
+        if self.solution is None or not self.solution.ok:
+            return None
+        return float(self.solution.lambda_of_x(float(x_px)))
+
+    def pick_our_spectrum(self, x_px: float) -> None:
+        """Half of an identification: this column of our spectrum."""
+        self.pending_x = float(x_px)
+        self._commit_pending()
+
+    def pick_reference(self, x_px: float) -> None:
+        """The other half: the wavelength the reference strip shows at this column.
+
+        The wavelength comes from the same mapping the strip was drawn with, so
+        it is exactly the feature under the cursor whatever the mapping is
+        currently worth.
+        """
+        value = self.wavelength_at(x_px)
+        if value is None:
+            return
+        self.pending_nm = value
+        self.pending_ref_x = float(x_px)
+        self._commit_pending()
+
+    def _commit_pending(self) -> None:
+        if self.pending_x is None or self.pending_nm is None:
+            return
+        self.add_anchor(self.pending_x, self.pending_nm)
+        self.pending_x = self.pending_nm = self.pending_ref_x = None
+
+    def add_anchor(self, x_px: float, wavelength_nm: float) -> None:
+        label = self.reference.nearest_label(wavelength_nm) if self.reference.ok else ""
+        self.anchors.append(wavelength.Anchor(float(x_px), float(wavelength_nm), label))
+        self.anchors.sort(key=lambda point: point.x_px)
+        self.refresh_wavelength()
+
+    def remove_anchor(self, index: int) -> None:
+        if 0 <= index < len(self.anchors):
+            del self.anchors[index]
+            self.refresh_wavelength()
+
+    def clear_anchors(self) -> None:
+        self.anchors = []
+        self.cancel_pending()
+        self.refresh_wavelength()
+
+    def cancel_pending(self) -> None:
+        self.pending_x = self.pending_nm = self.pending_ref_x = None
+
+    def _store_solution(self) -> None:
+        s = self.settings
+        solution = self.solution
+        s.wavelength_anchors = [point.as_dict() for point in self.anchors]
+        fitted = solution is not None and solution.ok and solution.kind == "fit"
+        s.wavelength_valid = bool(fitted)
+        if fitted:
+            s.wavelength_coefficients = [float(c) for c in solution.coefficients]
+            s.wavelength_x_ref = float(solution.x_ref)
+            s.wavelength_x_scale = float(solution.x_scale)
 
     def _store_band(self, result: calib.BandResult) -> None:
         s = self.settings
@@ -594,6 +746,12 @@ class App:
         s.show_spectrum = self.show_spectrum
         s.spectrum_height = self.spectrum_height
         s.spectrum_strip_ratio = self.strip_ratio
+        s.show_reference = self.show_reference
+        s.reference_blur_nm = self.reference_blur_nm
+        s.reference_from_nm = self.reference_from_nm
+        s.reference_to_nm = self.reference_to_nm
+        s.wavelength_max_degree = self.max_degree
+        self._store_solution()
         s.crop_x0, s.crop_y0, s.crop_x1, s.crop_y1 = [int(v) for v in self.crop]
         p = self.band_params
         s.band_angle_range_deg = p.angle_range_deg
@@ -611,3 +769,4 @@ class App:
         self.disconnect()
         self.texture.release()
         self.spectrum_texture.release()
+        self.reference_texture.release()

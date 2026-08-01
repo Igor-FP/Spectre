@@ -32,6 +32,9 @@ BAND_EDGE_COLOUR = _rgba(90, 255, 120)
 BAND_CENTRE_COLOUR = _rgba(90, 255, 120, 110)
 SHEAR_LINE_COLOUR = _rgba(90, 255, 120, 150)
 SHEAR_LINE_COUNT = 9  # dashed lines across the band, showing the line direction
+ANCHOR_MARK_COLOUR = _rgba(120, 255, 140, 200)
+PENDING_MARK_COLOUR = _rgba(255, 170, 60, 230)
+CURSOR_MARK_COLOUR = _rgba(255, 255, 255, 90)
 GRIP_COLOUR = _rgba(140, 170, 210, 200)
 CROP_COLOUR = _rgba(255, 70, 70, 220)
 CROP_ACTIVE_COLOUR = _rgba(255, 160, 90)
@@ -513,6 +516,7 @@ def _spectrum_panel(app: App) -> None:
     _band_curves_section(app)
     _shear_section(app)
     _capture_spectrum_section(app)
+    _wavelength_section(app)
     _band_overlay_section(app)
 
 
@@ -811,6 +815,138 @@ def _capture_spectrum_section(app: App) -> None:
     imgui.spacing()
 
 
+def _wavelength_section(app: App) -> None:
+    if not imgui.collapsing_header("Wavelength calibration", _OPEN):
+        return
+
+    if not app.reference.ok:
+        imgui.push_text_wrap_pos(0.0)
+        imgui.text_colored(RED, "no reference spectrum")
+        imgui.text_colored(GREY, "Fetch it with:  python tools/fetch_reference.py")
+        imgui.pop_text_wrap_pos()
+        imgui.spacing()
+        return
+
+    imgui.text_colored(
+        GREY,
+        f"reference {app.reference.first_nm:.0f}-{app.reference.last_nm:.0f} nm, "
+        f"{app.reference.wavelength_nm.size} points",
+    )
+    _, app.show_reference = imgui.checkbox("Show reference strip", app.show_reference)
+
+    imgui.set_next_item_width(-1)
+    changed, app.reference_blur_nm = imgui.slider_float(
+        "##blur", app.reference_blur_nm, 0.2, 6.0, "blur %.2f nm FWHM"
+    )
+    if imgui.is_item_hovered():
+        imgui.set_tooltip(
+            "The atlas is far finer than this instrument.\n"
+            "Blur it until its lines look like the ones in our spectrum."
+        )
+    if changed:
+        app.update_reference_strip()
+
+    # Until two points exist there is nothing to fit, so the reference is spread
+    # over a range set by hand - otherwise there would be nothing to click on.
+    imgui.begin_disabled(len(app.anchors) >= 2)
+    width = (imgui.get_content_region_avail().x - imgui.get_style().item_spacing.x) * 0.5
+    moved = False
+    imgui.set_next_item_width(width)
+    edited, app.reference_from_nm = imgui.drag_float(
+        "##ref_from", app.reference_from_nm, 1.0, 200.0, 1200.0, "from %.0f nm"
+    )
+    moved = moved or edited
+    imgui.same_line()
+    imgui.set_next_item_width(width)
+    edited, app.reference_to_nm = imgui.drag_float(
+        "##ref_to", app.reference_to_nm, 1.0, 200.0, 1200.0, "to %.0f nm"
+    )
+    moved = moved or edited
+    imgui.end_disabled()
+    if moved:
+        app.refresh_wavelength()
+
+    imgui.set_next_item_width(-1)
+    changed, app.max_degree = imgui.slider_int(
+        "##degree", app.max_degree, 1, 3, "polynomial up to degree %d"
+    )
+    if changed:
+        app.refresh_wavelength()
+
+    _anchor_table(app)
+
+    solution = app.solution
+    if solution is not None and solution.ok:
+        if solution.kind == "fit":
+            imgui.text_colored(
+                GREEN,
+                f"degree {solution.degree} through {solution.points_used} points, "
+                f"rms {solution.rms_nm:.3f} nm",
+            )
+        else:
+            imgui.text_colored(YELLOW, solution.message)
+        imgui.push_text_wrap_pos(0.0)
+        imgui.text_colored(GREY, solution.describe())
+        imgui.pop_text_wrap_pos()
+        if imgui.button("Copy formula", ImVec2(-1, 0)):
+            imgui.set_clipboard_text(solution.describe())
+    elif app.wavelength_status:
+        imgui.text_colored(YELLOW, app.wavelength_status)
+
+    imgui.push_text_wrap_pos(0.0)
+    imgui.text_colored(
+        GREY,
+        "Click a line on one strip, then the same line on the other; "
+        "right click cancels a half-made point.",
+    )
+    imgui.pop_text_wrap_pos()
+    imgui.spacing()
+
+
+def _anchor_table(app: App) -> None:
+    if not app.anchors:
+        return  # the solution message below already says there are none
+
+    solution = app.solution
+    residuals = (
+        solution.residuals_nm
+        if solution is not None and solution.residuals_nm.size == len(app.anchors)
+        else None
+    )
+    flags = imgui.TableFlags_.row_bg | imgui.TableFlags_.borders_inner_h
+    if imgui.begin_table("##anchors", 5, flags):
+        imgui.table_setup_column("x px")
+        imgui.table_setup_column("nm")
+        imgui.table_setup_column("line")
+        imgui.table_setup_column("resid")
+        imgui.table_setup_column("")
+        imgui.table_headers_row()
+        remove = -1
+        for index, anchor in enumerate(app.anchors):
+            imgui.table_next_row()
+            imgui.table_next_column()
+            imgui.text(f"{anchor.x_px:.1f}")
+            imgui.table_next_column()
+            imgui.text(f"{anchor.wavelength_nm:.2f}")
+            imgui.table_next_column()
+            imgui.text_colored(GREY, anchor.label or "-")
+            imgui.table_next_column()
+            if residuals is not None:
+                value = float(residuals[index])
+                imgui.text_colored(YELLOW if abs(value) > 1.0 else GREY, f"{value:+.2f}")
+            else:
+                imgui.text_colored(GREY, "-")
+            imgui.table_next_column()
+            if imgui.small_button(f"x##anchor{index}"):
+                remove = index
+        imgui.end_table()
+        if remove >= 0:
+            app.remove_anchor(remove)
+
+    if imgui.button("Clear points", ImVec2(-1, 0)):
+        app.clear_anchors()
+
+
 def _band_overlay_section(app: App) -> None:
     if not imgui.collapsing_header("Overlay", _OPEN):
         return
@@ -845,6 +981,32 @@ def _drag_handle(label: str, width: float, height: float = SPLITTER_H) -> float:
     return imgui.get_io().mouse_delta.y if imgui.is_item_active() else 0.0
 
 
+def _screen_x_of_column(app: App, rect_min, rect_max, x_px: float, length: int):
+    """Where a full-frame column lands on a strip, or None if it is off it."""
+    index = app.index_of_x(x_px)
+    if not 0.0 <= index <= length - 1.0:
+        return None
+    width = max(1.0, rect_max.x - rect_min.x)
+    return rect_min.x + (index + 0.5) / length * width
+
+
+def _column_under_mouse(app: App, rect_min, rect_max, mouse_x: float, length: int) -> float:
+    """The full-frame column the cursor points at over a strip."""
+    width = max(1.0, rect_max.x - rect_min.x)
+    index = (mouse_x - rect_min.x) / width * length - 0.5
+    return app.x_of_index(float(np.clip(index, 0.0, length - 1.0)))
+
+
+def _mark_column(app: App, draw_list, rects, x_px: float, length: int, colour: int, width=1.0):
+    """A vertical line at a column, drawn across every strip that is showing."""
+    for rect_min, rect_max in rects:
+        screen_x = _screen_x_of_column(app, rect_min, rect_max, x_px, length)
+        if screen_x is not None:
+            draw_list.add_line(
+                ImVec2(screen_x, rect_min.y), ImVec2(screen_x, rect_max.y), colour, width
+            )
+
+
 def _spectrum_window(app: App) -> None:
     style = imgui.get_style()
     full_width = imgui.get_content_region_avail().x
@@ -855,21 +1017,86 @@ def _spectrum_window(app: App) -> None:
         imgui.text_colored(GREY, app.spectrum_status or "no spectrum yet")
         return
 
+    show_reference = (
+        app.show_reference and app.reference.ok and app.reference_texture.valid
+    )
     avail = imgui.get_content_region_avail()
-    strip_h = float(np.clip(avail.x / max(app.strip_ratio, 2.0), 16.0, max(16.0, avail.y - 90.0)))
+    strips = 2 if show_reference else 1
+    strip_h = float(
+        np.clip(avail.x / max(app.strip_ratio, 2.0), 16.0, max(16.0, (avail.y - 90.0) / strips))
+    )
+    length = spectrum.length
+    mouse = imgui.get_io().mouse_pos
+
+    # The two strips are drawn flush, with no spacing and no border between them:
+    # ours on top, the reference resampled into our columns below, so a correct
+    # calibration reads as one image with the lines running straight through.
+    imgui.push_style_var(imgui.StyleVar_.item_spacing, ImVec2(0.0, 0.0))
     imgui.image(app.spectrum_texture.ref, ImVec2(avail.x, strip_h))
+    rects = [(imgui.get_item_rect_min(), imgui.get_item_rect_max())]
+    if imgui.is_item_hovered() and imgui.is_mouse_clicked(0):
+        app.pick_our_spectrum(_column_under_mouse(app, *rects[0], mouse.x, length))
+    hovered = imgui.is_item_hovered()
+
+    if show_reference:
+        imgui.image(app.reference_texture.ref, ImVec2(avail.x, strip_h))
+        rects.append((imgui.get_item_rect_min(), imgui.get_item_rect_max()))
+        if imgui.is_item_hovered() and imgui.is_mouse_clicked(0):
+            app.pick_reference(_column_under_mouse(app, *rects[1], mouse.x, length))
+        hovered = hovered or imgui.is_item_hovered()
+    imgui.pop_style_var()
+
+    if hovered and imgui.is_mouse_clicked(1):
+        app.cancel_pending()
+
+    draw_list = imgui.get_window_draw_list()
+    for anchor in app.anchors:
+        _mark_column(app, draw_list, rects, anchor.x_px, length, ANCHOR_MARK_COLOUR)
+    for pending in (app.pending_x, app.pending_ref_x):
+        if pending is not None:
+            _mark_column(app, draw_list, rects, pending, length, PENDING_MARK_COLOUR, 2.0)
+    cursor_x = None
+    if hovered:
+        cursor_x = _column_under_mouse(app, *rects[0], mouse.x, length)
+        _mark_column(app, draw_list, rects, cursor_x, length, CURSOR_MARK_COLOUR)
+
     moved = _drag_handle("##strip_splitter", avail.x)
     if moved:
         app.strip_ratio = float(np.clip(avail.x / max(strip_h + moved, 8.0), 3.0, 80.0))
 
-    imgui.text_colored(
-        GREY,
-        f"{spectrum.length} samples   averaged over {spectrum.rows_averaged} rows   "
-        f"band {spectrum.band_angle_deg:+.3f} deg, lines {spectrum.line_tilt_deg:+.3f} deg",
-    )
+    _spectrum_readout(app, spectrum, cursor_x)
     remaining = imgui.get_content_region_avail().y - style.item_spacing.y
     if remaining > 40.0:
         imgui.plot_lines("##spectrum_plot", spectrum.values, graph_size=ImVec2(-1, remaining))
+
+
+def _spectrum_readout(app: App, spectrum, cursor_x) -> None:
+    """The line under the strips: what is under the cursor, and what is pending."""
+    if cursor_x is not None:
+        index = int(round(app.index_of_x(cursor_x)))
+        index = int(np.clip(index, 0, spectrum.length - 1))
+        parts = [f"x {cursor_x:.1f} px", f"value {spectrum.values[index]:.0f}"]
+        nanometres = app.wavelength_at(cursor_x)
+        if nanometres is not None:
+            parts.insert(1, f"{nanometres:.2f} nm")
+        imgui.text_colored(CYAN, "   |   ".join(parts))
+        return
+
+    if app.pending_x is not None:
+        imgui.text_colored(
+            YELLOW, f"picked x {app.pending_x:.1f} px - now click the same line on the reference"
+        )
+    elif app.pending_nm is not None:
+        imgui.text_colored(
+            YELLOW,
+            f"picked {app.pending_nm:.2f} nm - now click the same line on our spectrum",
+        )
+    else:
+        imgui.text_colored(
+            GREY,
+            f"{spectrum.length} samples   averaged over {spectrum.rows_averaged} rows   "
+            f"band {spectrum.band_angle_deg:+.3f} deg, lines {spectrum.line_tilt_deg:+.3f} deg",
+        )
 
 
 # ---------------------------------------------------------------------------

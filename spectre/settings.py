@@ -75,6 +75,22 @@ class Settings:
     spectrum_height: float = 300.0
     spectrum_strip_ratio: float = 20.0
 
+    # wavelength calibration: the reference strip and the anchor points
+    show_reference: bool = True
+    reference_blur_nm: float = 2.0
+    #: Range the reference is spread over until there are points to fit.
+    reference_from_nm: float = 380.0
+    reference_to_nm: float = 780.0
+    wavelength_max_degree: int = 3
+    #: [{"x_px": ..., "nm": ..., "label": ...}], X in full-frame columns.
+    wavelength_anchors: list = field(default_factory=list)
+    # The fitted formula itself: coefficients highest power first, evaluated in
+    # t = (x - x_ref) / x_scale.
+    wavelength_valid: bool = False
+    wavelength_coefficients: list = field(default_factory=list)
+    wavelength_x_ref: float = 0.0
+    wavelength_x_scale: float = 1.0
+
     # view / window
     window_width: int = 1920
     window_height: int = 1040
