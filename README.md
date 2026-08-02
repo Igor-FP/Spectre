@@ -9,6 +9,9 @@ The goal is to shoot spectra and calibrate them, compare spectra against each
 other, plot them, and save them as 1-D FITS with the calibration written into the
 header.
 
+![The main window: live frame with the band overlay, the extracted spectrum
+against the reference solar spectrum, and the graph below](docs/images/screen.jpg)
+
 Implemented so far:
 
 * **live view** of the camera - the raw 16-bit linear frame, in real time, with
@@ -307,8 +310,15 @@ per cent of the brightest sample.
 
 **Export CSV** writes two columns, wavelength and per cent. **Export chart**
 draws the same curve as a picture - PNG at 3840x2160 and SVG beside it, with the
-grid, the colour strip under the axis, the edges of the visible range and every
-identified line marked. Both land in `captures/`.
+grid, the colour strip under the axis, the edges of the visible range and the
+lines that matter for astronomy marked. Both land in `captures/`.
+
+![The transmission curve of an IR-pass filter, measured against a baseline taken
+without it](docs/images/filter-curve.png)
+
+The curve above is a cheap IR-pass filter measured this way: transparent below
+1 % right across the visible, opening at about 660 nm just short of H-alpha, and
+the dip near 930 nm is the water vapour band in the room air, not the filter.
 
 ## Dark frames
 
