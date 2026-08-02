@@ -7,12 +7,12 @@ particular design, sensor size or camera model.
 
 The goal is to shoot spectra and calibrate them, compare spectra against each
 other, plot them, and save them as 1-D FITS with the calibration written into the
-header.
+header - or export the data as CSV and the chart as SVG and PNG.
 
 ![The main window: live frame with the band overlay, the extracted spectrum
 against the reference solar spectrum, and the graph below](docs/images/screen.jpg)
 
-And what comes out of it - the transmission curve of a cheap IR-pass filter,
+And what comes out of it - the transmission curve of a no-name IR-pass filter,
 measured against a spectrum taken without it:
 
 ![Transmission curve of an IR-pass filter](docs/images/filter-curve.png)
@@ -148,12 +148,20 @@ spectre/asi_sdk.py       ctypes binding of ASICamera2.dll (from ASICamera2.h, SD
 spectre/camera.py        grabber thread; AsiCamera (video/snap), FileCamera, SimulatedCamera
 spectre/display.py       display stretch (LUT), frame statistics, GL texture
 spectre/imgui_backend.py pygame backend for ImGui with the full keyboard mapped
+spectre/darks.py         master dark: median of N covered frames, live subtraction
 spectre/calib.py         all the geometry: band angle, shear, spectrum extraction
-spectre/frameio.py       saving and loading frames (FITS / .npy)
+spectre/reference.py     reference solar spectrum: blur, resample into our pixels
+spectre/wavelength.py    anchor points and the X -> wavelength polynomial
+spectre/chart.py         the curve as a finished picture (matplotlib, PNG + SVG)
+spectre/frameio.py       saving and loading frames (FITS / .npy), CSV export
 spectre/app.py           application state, connection, frame pipeline
 spectre/ui.py            ImGui panels, overlays, keyboard
 spectre/settings.py      settings.json
 tools/probe_camera.py    camera diagnostics from the console
+tools/fetch_reference.py downloads data/solar_reference.csv from BASS2000
+data/solar_reference.csv reference solar spectrum, 300-1130 nm at 0.1 nm
+captures/                saved frames, exported CSV and charts
+darks/                   master darks, dark_<gain>_<exposure key>.fit
 ```
 
 Capture runs in its own thread; the UI thread never calls the SDK. It queues
@@ -340,7 +348,7 @@ lines that matter for astronomy marked. Both land in `captures/`.
 ![The transmission curve of an IR-pass filter, measured against a baseline taken
 without it](docs/images/filter-curve.png)
 
-The curve above is a cheap IR-pass filter measured this way: transparent below
+The curve above is a no-name IR-pass filter measured this way: transparent below
 1 % right across the visible, opening at about 660 nm just short of H-alpha, and
 the dip near 930 nm is the water vapour band in the room air, not the filter.
 
