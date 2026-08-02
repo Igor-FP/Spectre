@@ -12,6 +12,11 @@ header.
 ![The main window: live frame with the band overlay, the extracted spectrum
 against the reference solar spectrum, and the graph below](docs/images/screen.jpg)
 
+And what comes out of it - the transmission curve of a cheap IR-pass filter,
+measured against a spectrum taken without it:
+
+![Transmission curve of an IR-pass filter](docs/images/filter-curve.png)
+
 Implemented so far:
 
 * **live view** of the camera - the raw 16-bit linear frame, in real time, with
@@ -29,14 +34,31 @@ Implemented so far:
   Y along the spectral lines, neither perpendicular to the other nor to the frame
   edges;
 * **1-D spectrum extraction** along that basis, shown as a strip and as a plot;
+* **wavelength calibration against the solar spectrum** - the main thing. A
+  reference solar atlas (300-1130 nm) is blurred down to the instrument's
+  resolution and drawn as a second strip flush under ours, resampled into our own
+  pixel columns. Identify a line by clicking it on the reference and then on our
+  spectrum; from three points on, X becomes nanometres, and the graph gets a
+  wavelength scale and a colour strip showing where the visible range falls;
+* **relative measurement** - keep one spectrum aside as a baseline and everything
+  is then read as a per cent of it. Shoot once without a filter, once with it,
+  and the graph is the filter's transmission curve;
+* **averaging** the last N spectra, a plain arithmetic mean, to pull a noisy
+  curve out of the grass;
+* **dark calibration** - seven covered frames medianed into a master dark, filed
+  under the gain and exposure it belongs to and picked up again by itself
+  whenever those two come back to it; or a flat bias level when there is no dark;
+* **export** - the curve as a two-column CSV, or as a finished picture, PNG at
+  3840x2160 and SVG beside it, with the grid, the colour strip and the lines that
+  matter for astronomy marked;
 * **saving frames** as 16-bit FITS (plus `.npy`) with exposure, gain, sensor
   temperature, crop position and the calibration in the header, and **replaying**
   a saved frame instead of a camera, so everything can be worked on without
   hardware.
 
-Not there yet: the wavelength calibration itself (identifying known lines to get
-the zero point and the scale along X), comparing several spectra, and the 1-D
-FITS export.
+Not there yet: the 1-D FITS export, comparing several spectra side by side, and
+deciding whether the X -> wavelength mapping should stay a polynomial or become
+the physical grating formula.
 
 Windows 10, Python 3.11+, pygame + Dear ImGui over OpenGL 3.3.
 
@@ -51,7 +73,9 @@ python tools/probe_camera.py               # check the camera without a GUI
 
 Algorithm specs and accumulated traps live in [docs/](docs/):
 [TZ_BandAngle.md](docs/TZ_BandAngle.md), [TZ_Shear.md](docs/TZ_Shear.md),
-[TZ_Spectrum.md](docs/TZ_Spectrum.md), [KnowledgeBase.md](docs/KnowledgeBase.md).
+[TZ_Spectrum.md](docs/TZ_Spectrum.md),
+[TZ_Wavelength.md](docs/TZ_Wavelength.md),
+[KnowledgeBase.md](docs/KnowledgeBase.md).
 
 ## Install
 
