@@ -852,7 +852,7 @@ class App:
             f"averaged over {spectrum.rows_averaged} rows",
         ]
         if self.averaged_over > 1:
-            notes.append(f"mean of the last {self.averaged_over} spectra")
+            notes.append(f"mean of {self.averaged_over} measurements")
         if self.calibrated:
             notes.append(self.solution.describe())
         if self.baseline is not None:
@@ -886,7 +886,7 @@ class App:
         os.makedirs(frameio.CAPTURE_DIR, exist_ok=True)
         title = "Spectre - " + os.path.basename(stem).replace("spectrum_", "")
         if self.averaged_over > 1:
-            title += f", mean of {self.averaged_over} spectra"
+            title += f", mean of {self.averaged_over} measurements"
         try:
             written = chart.export(
                 stem,
@@ -894,7 +894,6 @@ class App:
                 self.spectrum_shown,
                 self.spectrum_unit,
                 calibrated=self.calibrated,
-                anchors=self.anchors,
                 title=title,
                 notes=notes,
                 relative=self.baseline is not None,

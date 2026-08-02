@@ -221,6 +221,7 @@ __marimo__/
 # Test frames captured from the camera (FITS/NumPy, tens of MB each)
 captures/
 darks/
+300K/
 *.fits
 *.fit
 *.npy

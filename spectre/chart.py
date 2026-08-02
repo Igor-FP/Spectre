@@ -19,6 +19,22 @@ import numpy as np
 
 from . import display
 
+#: The wavelength range the picture covers, fixed rather than following the data:
+#: past this the camera barely responds and the curve there is not worth drawing.
+CHART_FROM_NM = 300.0
+CHART_TO_NM = 1050.0
+
+#: Lines marked on every chart - the ones that matter for astronomy, not the
+#: ones that happened to be clicked for the calibration.  Doublets are drawn at
+#: their strong member; the pair is closer together than the chart can resolve.
+MARKED_LINES = (
+    (486.13, "H-beta"),
+    (500.68, "O III"),
+    (656.28, "H-alpha"),
+    (671.64, "S II"),
+    (760.50, "O2 A"),
+)
+
 #: 16 x 9 inches at 240 dpi is exactly 3840 x 2160.  Sizes in matplotlib are in
 #: points, so fonts and line widths scale with the dpi on their own.
 FIGSIZE = (16.0, 9.0)
@@ -39,7 +55,6 @@ def export(
     values: np.ndarray,
     unit: str,
     calibrated: bool,
-    anchors: Sequence = (),
     title: str = "",
     notes: Sequence[str] = (),
     relative: bool = False,
@@ -58,7 +73,12 @@ def export(
 
     axis = np.asarray(axis, dtype=np.float64)
     values = np.asarray(values, dtype=np.float64)
-    low, high = float(axis.min()), float(axis.max())
+    # In nanometres the picture always covers the same range, so two charts can
+    # be laid side by side; in frame columns there is nothing to fix it to.
+    if calibrated:
+        low, high = CHART_FROM_NM, CHART_TO_NM
+    else:
+        low, high = float(axis.min()), float(axis.max())
 
     figure = plt.figure(figsize=FIGSIZE)
     if calibrated:
@@ -93,7 +113,8 @@ def export(
     if title:
         plot.set_title(title)
 
-    _mark_anchors(plot, anchors, low, high, calibrated)
+    if calibrated:
+        _mark_lines(plot, low, high)
 
     if strip is not None:
         wavelengths = np.linspace(low, high, STRIP_SAMPLES)
@@ -108,7 +129,13 @@ def export(
         plot.set_xlabel("Frame column, px")
 
     if notes:
-        figure.text(0.01, 0.005, "   ".join(notes), fontsize=7, color="#606060")
+        # Aligned with the left edge of the plot, not with the figure: saving
+        # crops to the ink, so a note starting further left than the axis labels
+        # would leave a band of white down the whole left side of the picture.
+        figure.text(
+            plot.get_position().x0, 0.005, "   ".join(notes),
+            fontsize=7, color="#606060",
+        )
 
     written = []
     for suffix in formats:
@@ -122,15 +149,13 @@ def export(
     return written
 
 
-def _mark_anchors(plot, anchors, low: float, high: float, calibrated: bool) -> None:
-    """A dashed line and a label at every identified line that is in range."""
-    for anchor in anchors:
-        position = anchor.wavelength_nm if calibrated else anchor.x_px
+def _mark_lines(plot, low: float, high: float) -> None:
+    """A dashed line and a label at every line of interest that is in range."""
+    for position, name in MARKED_LINES:
         if not low <= position <= high:
             continue
         plot.axvline(position, color=ANCHOR_COLOUR, lw=0.9, ls=(0, (2, 3)), alpha=0.8)
-        text = anchor.label or ""
-        text = f"{text}\n{anchor.wavelength_nm:.1f} nm" if text else f"{anchor.wavelength_nm:.1f} nm"
+        text = f"{name}\n{position:.1f} nm"
         plot.annotate(
             text,
             xy=(position, 1.0), xycoords=("data", "axes fraction"),
