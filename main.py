@@ -125,6 +125,7 @@ def setup_imgui(settings: Settings, size) -> SpectreRenderer:
     io.key_repeat_delay = 0.35
     io.key_repeat_rate = 0.04
     imgui.get_style().font_scale_main = settings.ui_scale
+    ui.load_fonts()  # before the renderer: it builds the atlas
     renderer = SpectreRenderer()
     io.display_size = size
     return renderer
@@ -186,6 +187,7 @@ def main(argv=None) -> int:
             app.poll_camera()  # GL upload happens outside the ImGui frame
             app.poll_band_search()
             app.poll_shear_search()
+            app.poll_dark_capture()
 
             if args.calibrate and not calibration_requested and app.frame is not None:
                 app.start_band_search()

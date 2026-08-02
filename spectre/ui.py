@@ -4,14 +4,24 @@ work on the right."""
 from __future__ import annotations
 
 import math
+import os
 import time
 from typing import Optional
 
 import numpy as np
 from imgui_bundle import imgui
 
-from .app import App, MIN_CROP, ZOOM_MAX, ZOOM_MIN
-from .camera import BANDWIDTH, EXPOSURE, GAIN, HIGH_SPEED, OFFSET
+from .app import App, DARK_CONFIRM_POPUP, DARK_PROGRESS_POPUP, MIN_CROP, ZOOM_MAX, ZOOM_MIN
+from .camera import (
+    BANDWIDTH,
+    EXPOSURE,
+    GAIN,
+    HIGH_SPEED,
+    OFFSET,
+    exposure_from_position,
+    exposure_position,
+)
+from .darks import DARK_FRAME_COUNT
 
 ImVec2 = imgui.ImVec2
 ImVec4 = imgui.ImVec4
@@ -28,13 +38,94 @@ def _rgba(red: int, green: int, blue: int, alpha: int = 255) -> int:
     return (alpha << 24) | (blue << 16) | (green << 8) | red
 
 
+def _shade(colour: int, amount: float) -> int:
+    """Same colour lightened (amount > 0) or darkened, alpha untouched."""
+    channels = []
+    for shift in (0, 8, 16):
+        level = (colour >> shift) & 0xFF
+        target = 255.0 if amount > 0.0 else 0.0
+        channels.append(int(round(level + (target - level) * abs(amount))))
+    return (colour & 0xFF000000) | channels[0] | (channels[1] << 8) | (channels[2] << 16)
+
+
+# ---------------------------------------------------------------------------
+# Buttons with a colour of their own
+# ---------------------------------------------------------------------------
+
+#: A bold face is taken from a system font, so nothing has to be shipped with
+#: the program.  If none of these is there the bold flag quietly does nothing -
+#: a missing font is not worth refusing to draw a button over.
+BOLD_FONT_CANDIDATES = (
+    r"C:\Windows\Fonts\consolab.ttf",  # Consolas Bold: matches the default face
+    r"C:\Windows\Fonts\segoeuib.ttf",
+    r"C:\Windows\Fonts\arialbd.ttf",
+)
+BOLD_FONT_PX = 13.0  # what ImGui's built-in face is drawn at
+
+_bold_font = None
+
+
+def load_fonts() -> None:
+    """Put the default face and a bold one in the atlas.
+
+    Must run before the renderer is built, and the default has to be added
+    first: ImGui hands everything the first font in the atlas.
+    """
+    global _bold_font
+    fonts = imgui.get_io().fonts
+    fonts.add_font_default()
+    for path in BOLD_FONT_CANDIDATES:
+        if not os.path.isfile(path):
+            continue
+        try:
+            _bold_font = fonts.add_font_from_file_ttf(path, BOLD_FONT_PX)
+        except Exception:
+            _bold_font = None
+        if _bold_font is not None:
+            return
+
+
+def button(
+    label: str,
+    size: Optional["ImVec2"] = None,
+    background: Optional[int] = None,
+    text: Optional[int] = None,
+    bold: bool = False,
+) -> bool:
+    """One line for a button with its own background, text colour and weight.
+
+    Colours are packed the `_rgba` way.  The hovered and pressed shades are
+    derived from the background, so a call only ever names one colour.
+    """
+    pushed = 0
+    if background is not None:
+        imgui.push_style_color(imgui.Col_.button, background)
+        imgui.push_style_color(imgui.Col_.button_hovered, _shade(background, 0.18))
+        imgui.push_style_color(imgui.Col_.button_active, _shade(background, -0.18))
+        pushed += 3
+    if text is not None:
+        imgui.push_style_color(imgui.Col_.text, text)
+        pushed += 1
+    weighted = bold and _bold_font is not None
+    if weighted:
+        imgui.push_font(_bold_font, 0.0)  # 0 = keep the size already in force
+    clicked = imgui.button(label, size if size is not None else ImVec2(0, 0))
+    if weighted:
+        imgui.pop_font()
+    if pushed:
+        imgui.pop_style_color(pushed)
+    return clicked
+
+
 BAND_EDGE_COLOUR = _rgba(90, 255, 120)
 BAND_CENTRE_COLOUR = _rgba(90, 255, 120, 110)
 SHEAR_LINE_COLOUR = _rgba(90, 255, 120, 150)
 SHEAR_LINE_COUNT = 9  # dashed lines across the band, showing the line direction
 ANCHOR_MARK_COLOUR = _rgba(120, 255, 140, 200)
-PENDING_MARK_COLOUR = _rgba(255, 170, 60, 230)
 CURSOR_MARK_COLOUR = _rgba(255, 255, 255, 90)
+RULER_COLOUR = _rgba(190, 195, 205, 220)
+BUTTON_RED = _rgba(150, 45, 45)
+BUTTON_GREEN = _rgba(40, 120, 55)
 GRIP_COLOUR = _rgba(140, 170, 210, 200)
 CROP_COLOUR = _rgba(255, 70, 70, 220)
 CROP_ACTIVE_COLOUR = _rgba(255, 160, 90)
@@ -49,6 +140,9 @@ _FIXED_WINDOW = (
     | imgui.WindowFlags_.no_bring_to_front_on_focus
 )
 _OPEN = imgui.TreeNodeFlags_.default_open
+
+#: What ImGui reads as "work the range out yourself" in plot_lines.
+FLT_MAX = 3.402823466e38
 
 ZOOM_STEP = 1.25
 EXPOSURE_STEP = 1.25
@@ -123,6 +217,7 @@ def draw(app: App) -> None:
 def _control_panel(app: App) -> None:
     _camera_section(app)
     _acquisition_section(app)
+    _dark_section(app)
     _display_section(app)
     _statistics_section(app)
     _save_section(app)
@@ -327,34 +422,10 @@ def _acquisition_section(app: App) -> None:
     imgui.spacing()
 
 
-#: The exposure slider: 1 ms at the left edge, 1 s exactly in the middle, 10
-#: minutes at the right. Each half is logarithmic on its own, because a single
-#: logarithmic scale always puts sqrt(min*max) in the middle - 775 ms here - and
-#: no choice of base changes that, the base cancels. The two halves span 3.00 and
-#: 2.78 decades, so the kink at the middle is not noticeable.
-EXPOSURE_SLIDER_MIN_MS = 1.0
-EXPOSURE_SLIDER_MID_MS = 1000.0
-EXPOSURE_SLIDER_MAX_MS = 600_000.0
-
-
-def _exposure_to_slider(ms: float) -> float:
-    """Exposure in milliseconds -> slider position in 0..1."""
-    ms = float(np.clip(ms, EXPOSURE_SLIDER_MIN_MS, EXPOSURE_SLIDER_MAX_MS))
-    if ms <= EXPOSURE_SLIDER_MID_MS:
-        span = math.log(EXPOSURE_SLIDER_MID_MS / EXPOSURE_SLIDER_MIN_MS)
-        return 0.5 * math.log(ms / EXPOSURE_SLIDER_MIN_MS) / span
-    span = math.log(EXPOSURE_SLIDER_MAX_MS / EXPOSURE_SLIDER_MID_MS)
-    return 0.5 + 0.5 * math.log(ms / EXPOSURE_SLIDER_MID_MS) / span
-
-
-def _slider_to_exposure(position: float) -> float:
-    """Slider position in 0..1 -> exposure in milliseconds."""
-    position = float(np.clip(position, 0.0, 1.0))
-    if position <= 0.5:
-        ratio = EXPOSURE_SLIDER_MID_MS / EXPOSURE_SLIDER_MIN_MS
-        return EXPOSURE_SLIDER_MIN_MS * ratio ** (position / 0.5)
-    ratio = EXPOSURE_SLIDER_MAX_MS / EXPOSURE_SLIDER_MID_MS
-    return EXPOSURE_SLIDER_MID_MS * ratio ** ((position - 0.5) / 0.5)
+#: The slider runs on the shared exposure scale, the same one a dark frame is
+#: filed under; the formula lives in `camera.py` so the two cannot drift apart.
+_exposure_to_slider = exposure_position
+_slider_to_exposure = exposure_from_position
 
 
 def _exposure_text(ms: float) -> str:
@@ -366,6 +437,113 @@ def _exposure_text(ms: float) -> str:
     if ms < 60_000.0:
         return f"{ms / 1000.0:.4g} s"
     return f"{ms / 60_000.0:.4g} min"
+
+
+def _dark_section(app: App) -> None:
+    if not imgui.collapsing_header("Dark calibration", _OPEN):
+        return
+
+    # Consumed once: opening a popup has to be a transition, not a state.
+    if app.dark_popup_request:
+        imgui.open_popup(app.dark_popup_request)
+        app.dark_popup_request = ""
+
+    busy = app.dark_maker.running
+    imgui.begin_disabled(app.camera is None or busy)
+    if imgui.button("Make Dark", ImVec2(-1, 0)):
+        app.dark_popup_request = DARK_CONFIRM_POPUP
+    imgui.end_disabled()
+    if imgui.is_item_hovered():
+        imgui.set_tooltip(
+            f"Takes {DARK_FRAME_COUNT} covered frames at the current gain and\n"
+            "exposure, medians them, and files the result under those two."
+        )
+
+    available = app.dark_on_disk()
+    imgui.begin_disabled(available is None and not app.use_dark)
+    changed, use = imgui.checkbox("Use dark", app.use_dark)
+    imgui.end_disabled()
+    if changed:
+        app.set_use_dark(use)
+
+    # A flat level standing in for a dark, so that ratios between ADU values
+    # stay honest without one.  While a dark is doing the job the tick reads as
+    # off; the setting behind it is kept and comes back when the dark goes.
+    imgui.same_line()
+    imgui.begin_disabled(app.dark_applies)
+    changed, use_bias = imgui.checkbox(
+        "Use bias", False if app.dark_applies else app.use_bias
+    )
+    if changed:
+        app.use_bias = use_bias
+        app.save_state()
+    imgui.same_line()
+    imgui.set_next_item_width(90.0)
+    _, level = imgui.input_int("##bias", app.bias_level, 0, 0)
+    if imgui.is_item_deactivated_after_edit():
+        app.bias_level = int(np.clip(level, 0, 65535))
+        app.save_state()
+    imgui.end_disabled()
+    if imgui.is_item_hovered():
+        imgui.set_tooltip(
+            "ADU taken off every frame when there is no dark for the\n"
+            "current gain and exposure."
+        )
+
+    if available is None and not app.use_dark:
+        gain = app.control_value(GAIN, 0)
+        exposure = app.control_value(EXPOSURE, 0)
+        imgui.text_colored(
+            GREY,
+            f"no dark for gain {gain}, {_exposure_text(exposure / 1000.0)}"
+            if app.camera is not None
+            else "no camera",
+        )
+    if app.dark_status:
+        imgui.push_text_wrap_pos(0.0)
+        imgui.text_colored(GREY, app.dark_status)
+        imgui.pop_text_wrap_pos()
+
+    _dark_popups(app)
+    imgui.spacing()
+
+
+_MODAL = (
+    imgui.WindowFlags_.always_auto_resize
+    | imgui.WindowFlags_.no_saved_settings
+    | imgui.WindowFlags_.no_move
+)
+
+
+def _dark_popups(app: App) -> None:
+    if imgui.begin_popup_modal(DARK_CONFIRM_POPUP, None, _MODAL)[0]:
+        imgui.text("Please turn off the light or close the unit.")
+        imgui.text_colored(
+            GREY,
+            f"{DARK_FRAME_COUNT} frames will be taken at gain "
+            f"{app.control_value(GAIN, 0)}, "
+            f"{_exposure_text(app.control_value(EXPOSURE, 0) / 1000.0)}.",
+        )
+        imgui.spacing()
+        if imgui.button("Start", ImVec2(140, 0)):
+            app.start_dark_capture()
+            imgui.close_current_popup()
+        imgui.same_line()
+        if imgui.button("Cancel", ImVec2(140, 0)):
+            imgui.close_current_popup()
+        imgui.end_popup()
+
+    if imgui.begin_popup_modal(DARK_PROGRESS_POPUP, None, _MODAL)[0]:
+        done, wanted = app.dark_maker.progress
+        imgui.text("Taking dark frames - keep the unit covered.")
+        imgui.progress_bar(
+            done / max(wanted, 1), ImVec2(300, 0), f"{done} of {wanted}"
+        )
+        if imgui.button("Cancel", ImVec2(140, 0)):
+            app.cancel_dark_capture()
+        if not app.dark_maker.running:
+            imgui.close_current_popup()
+        imgui.end_popup()
 
 
 def _display_section(app: App) -> None:
@@ -810,8 +988,11 @@ def _capture_spectrum_section(app: App) -> None:
         imgui.text_colored(
             GREY, "Extracted from every new frame while the window is open."
         )
-    if app.spectrum_status:
-        imgui.text_colored(YELLOW, app.spectrum_status)
+    for message in (app.spectrum_status, app.baseline_status, app.export_status):
+        if message:
+            imgui.push_text_wrap_pos(0.0)
+            imgui.text_colored(GREY, message)
+            imgui.pop_text_wrap_pos()
     imgui.spacing()
 
 
@@ -832,7 +1013,9 @@ def _wavelength_section(app: App) -> None:
         f"reference {app.reference.first_nm:.0f}-{app.reference.last_nm:.0f} nm, "
         f"{app.reference.wavelength_nm.size} points",
     )
-    _, app.show_reference = imgui.checkbox("Show reference strip", app.show_reference)
+    toggled, app.show_reference = imgui.checkbox("Show reference strip", app.show_reference)
+    if toggled:
+        app.save_state()
 
     imgui.set_next_item_width(-1)
     changed, app.reference_blur_nm = imgui.slider_float(
@@ -845,6 +1028,7 @@ def _wavelength_section(app: App) -> None:
         )
     if changed:
         app.update_reference_strip()
+    settled = imgui.is_item_deactivated_after_edit()
 
     # Until two points exist there is nothing to fit, so the reference is spread
     # over a range set by hand - otherwise there would be nothing to click on.
@@ -856,12 +1040,14 @@ def _wavelength_section(app: App) -> None:
         "##ref_from", app.reference_from_nm, 1.0, 200.0, 1200.0, "from %.0f nm"
     )
     moved = moved or edited
+    settled = settled or imgui.is_item_deactivated_after_edit()
     imgui.same_line()
     imgui.set_next_item_width(width)
     edited, app.reference_to_nm = imgui.drag_float(
         "##ref_to", app.reference_to_nm, 1.0, 200.0, 1200.0, "to %.0f nm"
     )
     moved = moved or edited
+    settled = settled or imgui.is_item_deactivated_after_edit()
     imgui.end_disabled()
     if moved:
         app.refresh_wavelength()
@@ -872,6 +1058,9 @@ def _wavelength_section(app: App) -> None:
     )
     if changed:
         app.refresh_wavelength()
+    # Written when the slider is let go, not on every frame of the drag.
+    if settled or imgui.is_item_deactivated_after_edit():
+        app.save_state()
 
     _anchor_table(app)
 
@@ -896,8 +1085,8 @@ def _wavelength_section(app: App) -> None:
     imgui.push_text_wrap_pos(0.0)
     imgui.text_colored(
         GREY,
-        "Click a line on one strip, then the same line on the other; "
-        "right click cancels a half-made point.",
+        "Points are made by clicking the strips in the spectrum window; the state "
+        "line under the plot there has Undo and Reset.",
     )
     imgui.pop_text_wrap_pos()
     imgui.spacing()
@@ -942,9 +1131,6 @@ def _anchor_table(app: App) -> None:
         imgui.end_table()
         if remove >= 0:
             app.remove_anchor(remove)
-
-    if imgui.button("Clear points", ImVec2(-1, 0)):
-        app.clear_anchors()
 
 
 def _band_overlay_section(app: App) -> None:
@@ -1007,23 +1193,49 @@ def _mark_column(app: App, draw_list, rects, x_px: float, length: int, colour: i
             )
 
 
+#: Both pick lines stop this far short of the seam between the two strips, so
+#: the sloped connector between their ends is visible.
+PICK_GAP_PX = 10.0
+PICK_REFERENCE_COLOUR = _rgba(255, 215, 60)  # yellow: the line on the reference
+PICK_SPECTRUM_COLOUR = _rgba(90, 255, 120)  # green: the line on our spectrum
+COLOUR_BAR_PX = 6.0
+RULER_TICK_PX = 5.0
+#: Nice wavelength steps for the ruler, in nm; the first one that leaves this
+#: much room between labels wins.
+RULER_STEPS_NM = (1.0, 2.0, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0, 500.0)
+RULER_LABEL_ROOM_PX = 90.0
+
+
 def _spectrum_window(app: App) -> None:
     style = imgui.get_style()
     full_width = imgui.get_content_region_avail().x
     app.spectrum_height -= _drag_handle("##spectrum_splitter", full_width)
 
     spectrum = app.spectrum
-    if spectrum is None or not spectrum.ok or not app.spectrum_texture.valid:
+    shown = app.spectrum_shown
+    if spectrum is None or not spectrum.ok or shown is None or not app.spectrum_texture.valid:
         imgui.text_colored(GREY, app.spectrum_status or "no spectrum yet")
         return
 
     show_reference = (
         app.show_reference and app.reference.ok and app.reference_texture.valid
     )
+    calibrated = app.calibrated
+    show_colours = calibrated and app.colour_texture.valid
+    ruler_h = (imgui.get_text_line_height() + RULER_TICK_PX + 2.0) if calibrated else 0.0
+
     avail = imgui.get_content_region_avail()
     strips = 2 if show_reference else 1
+    # One colour bar under the reference, another under the plot, and the ruler
+    # below that one: the scale belongs to the graph.
+    under_plot = (COLOUR_BAR_PX if show_colours else 0.0) + ruler_h
+    extras = (COLOUR_BAR_PX if show_colours else 0.0) + under_plot
     strip_h = float(
-        np.clip(avail.x / max(app.strip_ratio, 2.0), 16.0, max(16.0, (avail.y - 90.0) / strips))
+        np.clip(
+            avail.x / max(app.strip_ratio, 2.0),
+            16.0,
+            max(16.0, (avail.y - 100.0 - extras) / strips),
+        )
     )
     length = spectrum.length
     mouse = imgui.get_io().mouse_pos
@@ -1033,70 +1245,368 @@ def _spectrum_window(app: App) -> None:
     # calibration reads as one image with the lines running straight through.
     imgui.push_style_var(imgui.StyleVar_.item_spacing, ImVec2(0.0, 0.0))
     imgui.image(app.spectrum_texture.ref, ImVec2(avail.x, strip_h))
-    rects = [(imgui.get_item_rect_min(), imgui.get_item_rect_max())]
-    if imgui.is_item_hovered() and imgui.is_mouse_clicked(0):
-        app.pick_our_spectrum(_column_under_mouse(app, *rects[0], mouse.x, length))
+    ours = (imgui.get_item_rect_min(), imgui.get_item_rect_max())
+    rects = [ours]
     hovered = imgui.is_item_hovered()
+    if hovered and imgui.is_mouse_clicked(0):
+        app.pick_our_spectrum(_column_under_mouse(app, *ours, mouse.x, length))
 
+    reference_rect = None
     if show_reference:
         imgui.image(app.reference_texture.ref, ImVec2(avail.x, strip_h))
-        rects.append((imgui.get_item_rect_min(), imgui.get_item_rect_max()))
+        reference_rect = (imgui.get_item_rect_min(), imgui.get_item_rect_max())
+        rects.append(reference_rect)
         if imgui.is_item_hovered() and imgui.is_mouse_clicked(0):
-            app.pick_reference(_column_under_mouse(app, *rects[1], mouse.x, length))
+            app.pick_reference(_column_under_mouse(app, *reference_rect, mouse.x, length))
         hovered = hovered or imgui.is_item_hovered()
+    if show_colours:
+        imgui.image(app.colour_texture.ref, ImVec2(avail.x, COLOUR_BAR_PX))
     imgui.pop_style_var()
-
-    if hovered and imgui.is_mouse_clicked(1):
-        app.cancel_pending()
-
-    draw_list = imgui.get_window_draw_list()
-    for anchor in app.anchors:
-        _mark_column(app, draw_list, rects, anchor.x_px, length, ANCHOR_MARK_COLOUR)
-    for pending in (app.pending_x, app.pending_ref_x):
-        if pending is not None:
-            _mark_column(app, draw_list, rects, pending, length, PENDING_MARK_COLOUR, 2.0)
-    cursor_x = None
-    if hovered:
-        cursor_x = _column_under_mouse(app, *rects[0], mouse.x, length)
-        _mark_column(app, draw_list, rects, cursor_x, length, CURSOR_MARK_COLOUR)
 
     moved = _drag_handle("##strip_splitter", avail.x)
     if moved:
         app.strip_ratio = float(np.clip(avail.x / max(strip_h + moved, 8.0), 3.0, 80.0))
 
-    _spectrum_readout(app, spectrum, cursor_x)
-    remaining = imgui.get_content_region_avail().y - style.item_spacing.y
-    if remaining > 40.0:
-        imgui.plot_lines("##spectrum_plot", spectrum.values, graph_size=ImVec2(-1, remaining))
+    controls_h = imgui.get_frame_height() + style.item_spacing.y
+    plot_h = imgui.get_content_region_avail().y - under_plot - controls_h - style.item_spacing.y
+    plot_rect = None
+    if plot_h > 40.0:
+        # No frame padding: ImGui insets the curve by it, and the whole point is
+        # that a column of the graph sits under the same column of the strips.
+        imgui.push_style_var(imgui.StyleVar_.frame_padding, ImVec2(0.0, 0.0))
+        # Against a comparison spectrum the scale is nailed to 0..100 %:
+        # anything above the baseline is noise, and letting it set the top of
+        # the graph would squash the curve that is actually being measured.
+        # Without one the values are per cent of the peak, and autoscale is
+        # free to zoom into whatever range the spectrum occupies.
+        relative = app.baseline is not None
+        imgui.plot_lines(
+            "##spectrum_plot", shown,
+            scale_min=0.0 if relative else FLT_MAX,
+            scale_max=100.0 if relative else FLT_MAX,
+            graph_size=ImVec2(-1, plot_h),
+        )
+        plot_rect = (imgui.get_item_rect_min(), imgui.get_item_rect_max())
+        over_plot = imgui.is_item_hovered()
+        hovered = hovered or over_plot
+        imgui.pop_style_var()
+        if over_plot:
+            # PlotLines puts up its own tooltip with the two ends of the segment
+            # under the cursor, in raw units, and there is no flag to turn it
+            # off. A tooltip set afterwards replaces it: one sample, per cent.
+            column = _column_under_mouse(app, *plot_rect, mouse.x, length)
+            index = int(np.clip(round(app.index_of_x(column)), 0, length - 1))
+            nanometres = app.wavelength_at(column)
+            imgui.set_tooltip(
+                f"{shown[index]:.1f}%" if nanometres is None
+                else f"{nanometres:.0f}nm : {shown[index]:.1f}%"
+            )
+        if show_colours:
+            imgui.push_style_var(imgui.StyleVar_.item_spacing, ImVec2(0.0, 0.0))
+            imgui.image(app.colour_texture.ref, ImVec2(avail.x, COLOUR_BAR_PX))
+            imgui.pop_style_var()
+        if calibrated:
+            _wavelength_ruler(app, spectrum, ours[0].x, avail.x, ruler_h)
+
+    if hovered and imgui.is_mouse_clicked(1):
+        app.cancel_pending()
+
+    # Overlays last, so nothing drawn afterwards covers them.
+    draw_list = imgui.get_window_draw_list()
+    for anchor in app.anchors:
+        _mark_column(app, draw_list, rects, anchor.x_px, length, ANCHOR_MARK_COLOUR)
+    cursor_x = _column_under_mouse(app, *ours, mouse.x, length) if hovered else None
+    if app.calibrating:
+        _draw_pick_lines(app, draw_list, ours, reference_rect, length, mouse, hovered)
+    elif cursor_x is not None:
+        # Once the calibration stands, the strips and the graph share one axis,
+        # so the cursor line is drawn straight through all of them.
+        through = rects + ([plot_rect] if calibrated and plot_rect else [])
+        _mark_column(app, draw_list, through, cursor_x, length, CURSOR_MARK_COLOUR)
+
+    _wavelength_controls(app, spectrum, cursor_x)
 
 
-def _spectrum_readout(app: App, spectrum, cursor_x) -> None:
-    """The line under the strips: what is under the cursor, and what is pending."""
-    if cursor_x is not None:
-        index = int(round(app.index_of_x(cursor_x)))
-        index = int(np.clip(index, 0, spectrum.length - 1))
-        parts = [f"x {cursor_x:.1f} px", f"value {spectrum.values[index]:.0f}"]
-        nanometres = app.wavelength_at(cursor_x)
-        if nanometres is not None:
-            parts.insert(1, f"{nanometres:.2f} nm")
-        imgui.text_colored(CYAN, "   |   ".join(parts))
+def _draw_pick_lines(app: App, draw_list, ours, reference_rect, length, mouse, hovered) -> None:
+    """The whole instruction, drawn rather than written.
+
+    Waiting for the first click: a yellow line follows the cursor down the
+    reference.  Once it has landed the yellow line stays put and a green one
+    follows the cursor along our spectrum; a sloped segment joins the two ends,
+    so it is obvious which feature is being tied to which.  When the point lands
+    and the reference slides into place, that slope straightens out into the
+    continuation of both lines.
+    """
+    if reference_rect is None:
+        return
+    (ours_min, ours_max), (ref_min, ref_max) = ours, reference_rect
+    seam = ours_max.y
+    top_end = seam - PICK_GAP_PX  # where the green line stops
+    bottom_end = seam + PICK_GAP_PX  # where the yellow line starts
+
+    if app.pending_nm is None:
+        if hovered:
+            x = float(np.clip(mouse.x, ref_min.x, ref_max.x))
+            draw_list.add_line(
+                ImVec2(x, bottom_end), ImVec2(x, ref_max.y), PICK_REFERENCE_COLOUR, 2.0
+            )
         return
 
-    if app.pending_x is not None:
-        imgui.text_colored(
-            YELLOW, f"picked x {app.pending_x:.1f} px - now click the same line on the reference"
+    fixed = _screen_x_of_column(app, ref_min, ref_max, app.pending_ref_x, length)
+    if fixed is None:
+        return
+    draw_list.add_line(
+        ImVec2(fixed, bottom_end), ImVec2(fixed, ref_max.y), PICK_REFERENCE_COLOUR, 2.0
+    )
+    if not hovered:
+        return
+    moving = float(np.clip(mouse.x, ours_min.x, ours_max.x))
+    draw_list.add_line(
+        ImVec2(moving, ours_min.y), ImVec2(moving, top_end), PICK_SPECTRUM_COLOUR, 2.0
+    )
+    # Two halves meeting at the seam, so the join reads as the continuation of
+    # whichever line it leaves.
+    middle = ImVec2(0.5 * (moving + fixed), seam)
+    draw_list.add_line(ImVec2(moving, top_end), middle, PICK_SPECTRUM_COLOUR, 2.0)
+    draw_list.add_line(middle, ImVec2(fixed, bottom_end), PICK_REFERENCE_COLOUR, 2.0)
+
+
+def _wavelength_ruler(app: App, spectrum, left: float, width: float, height: float) -> None:
+    """Ticks and numbers in nanometres under the strips, on the same X axis."""
+    imgui.dummy(ImVec2(width, height))
+    top_left, bottom_right = imgui.get_item_rect_min(), imgui.get_item_rect_max()
+    length = spectrum.length
+    columns = np.arange(length, dtype=np.float64) + app.x_of_index(0)
+    lambdas = np.asarray(app.solution.lambda_of_x(columns), dtype=np.float64)
+
+    steps = np.diff(lambdas)
+    if length < 2 or not (np.all(steps > 0) or np.all(steps < 0)):
+        return  # a fit that doubles back has no usable axis
+    rising = lambdas[-1] > lambdas[0]
+    knots = lambdas if rising else lambdas[::-1]
+    positions = np.arange(length, dtype=np.float64)
+    if not rising:
+        positions = positions[::-1]
+
+    low, high = float(min(lambdas[0], lambdas[-1])), float(max(lambdas[0], lambdas[-1]))
+    for step in RULER_STEPS_NM:
+        if width / max((high - low) / step, 1e-9) >= RULER_LABEL_ROOM_PX:
+            break
+    ticks = np.arange(math.ceil(low / step) * step, high + step * 0.5, step)
+    if ticks.size == 0:
+        return
+
+    draw_list = imgui.get_window_draw_list()
+    for value, index in zip(ticks, np.interp(ticks, knots, positions)):
+        x = left + (index + 0.5) / length * width
+        draw_list.add_line(
+            ImVec2(x, top_left.y), ImVec2(x, top_left.y + RULER_TICK_PX), RULER_COLOUR, 1.0
         )
-    elif app.pending_nm is not None:
-        imgui.text_colored(
-            YELLOW,
-            f"picked {app.pending_nm:.2f} nm - now click the same line on our spectrum",
+        text = f"{value:g}"
+        size = imgui.calc_text_size(text)
+        place = float(np.clip(x - size.x * 0.5, top_left.x, bottom_right.x - size.x))
+        draw_list.add_text(ImVec2(place, top_left.y + RULER_TICK_PX), RULER_COLOUR, text)
+
+
+UNDO_BUTTON_W = 80.0
+RESET_BUTTON_W = 80.0
+MODE_BUTTON_W = 200.0
+BASELINE_BUTTON_W = 130.0
+EXPORT_BUTTON_W = 100.0
+CHART_BUTTON_W = 120.0
+AVERAGE_LABEL = "Average"
+AVERAGE_FIELD_W = 70.0
+
+
+def _clipped(text: str, width: float) -> str:
+    """`text` shortened until it fits `width`, so two fields cannot overlap."""
+    if imgui.calc_text_size(text).x <= width:
+        return text
+    while text and imgui.calc_text_size(text + "...").x > width:
+        text = text[:-1]
+    return text + "..."
+
+
+def _wavelength_controls(app: App, spectrum, cursor_x) -> None:
+    """The row under the plot: where we are, how the fit stands, undo and reset."""
+    style = imgui.get_style()
+    full = imgui.get_content_region_avail().x
+    origin = imgui.get_cursor_pos_x()
+    buttons = (
+        imgui.calc_text_size(AVERAGE_LABEL).x + AVERAGE_FIELD_W
+        + BASELINE_BUTTON_W + EXPORT_BUTTON_W + CHART_BUTTON_W
+        + UNDO_BUTTON_W + RESET_BUTTON_W + MODE_BUTTON_W
+        + 7.0 * style.item_spacing.x
+    )
+    text_room = max(120.0, full - buttons - 2.0 * style.item_spacing.x)
+    state_w = text_room * 0.60
+
+    imgui.align_text_to_frame_padding()
+    colour, text = _wavelength_state(app, spectrum, cursor_x)
+    imgui.text_colored(colour, _clipped(text, state_w - style.item_spacing.x))
+
+    imgui.same_line(origin + state_w)
+    colour, text = _wavelength_summary(app)
+    imgui.text_colored(colour, _clipped(text, text_room - state_w))
+
+    imgui.same_line(origin + full - buttons)
+    _measurement_buttons(app)
+
+    # Waiting for the second click, the only sensible thing to take back is that
+    # first click, so the button says so.
+    cancelling = app.calibrating and app.pending_pick
+    imgui.same_line()
+    imgui.begin_disabled(not app.can_undo_wavelength)
+    if imgui.button("Cancel" if cancelling else "Undo", ImVec2(UNDO_BUTTON_W, 0)):
+        app.cancel_pending() if cancelling else app.undo_wavelength()
+    imgui.end_disabled()
+    if imgui.is_item_hovered():
+        imgui.set_tooltip(
+            "While a line is picked on the reference: drops that pick.\n"
+            "Otherwise takes back the last point made in this session;\n"
+            "points read back from settings.json are left to Reset.\n"
+            "A right click on either strip drops a pick too."
         )
+
+    imgui.same_line()
+    imgui.begin_disabled(not app.can_reset_wavelength)
+    if imgui.button("Reset", ImVec2(RESET_BUTTON_W, 0)):
+        app.reset_wavelength()
+    imgui.end_disabled()
+    if imgui.is_item_hovered():
+        imgui.set_tooltip(
+            "Drops every point and the fitted formula, including the ones\n"
+            "restored from settings.json, and leaves the calibration mode.\n"
+            "The band angle, the shear and the spectrum itself are left alone."
+        )
+
+    imgui.same_line()
+    _mode_button(app)
+
+
+def _measurement_buttons(app: App) -> None:
+    """Averaging, relative measurement, and getting the curve out."""
+    imgui.align_text_to_frame_padding()
+    imgui.text(AVERAGE_LABEL)
+    imgui.same_line()
+    imgui.set_next_item_width(AVERAGE_FIELD_W)
+    _, count = imgui.input_int("##average", app.average_count, 0, 0)
+    if imgui.is_item_deactivated_after_edit():
+        app.set_average_count(count)
+    if imgui.is_item_hovered():
+        imgui.set_tooltip(
+            "Mean of the last N spectra - the strip, the graph, the readouts\n"
+            "and the export all show it.  1 is off.\n"
+            f"holding {app.averaged_over} of {app.average_count} right now"
+        )
+    imgui.same_line()
+
+    size = ImVec2(BASELINE_BUTTON_W, 0)
+    if app.baseline is None:
+        if button("Set baseline", size):
+            app.set_baseline()
+        if imgui.is_item_hovered():
+            imgui.set_tooltip(
+                "Keeps this spectrum aside; everything is then read as a per\n"
+                "cent of it.  Take one without the filter, put the filter in,\n"
+                "and the graph is its transmission curve.\n"
+                "Zero and below in the baseline count as one, so the division\n"
+                "always has something to divide by."
+            )
     else:
-        imgui.text_colored(
-            GREY,
-            f"{spectrum.length} samples   averaged over {spectrum.rows_averaged} rows   "
-            f"band {spectrum.band_angle_deg:+.3f} deg, lines {spectrum.line_tilt_deg:+.3f} deg",
+        if button("Clear baseline", size, BUTTON_GREEN, bold=True):
+            app.clear_baseline()
+        if imgui.is_item_hovered():
+            imgui.set_tooltip("Back to reading per cent of the brightest sample.")
+
+    imgui.same_line()
+    if button("Export CSV", ImVec2(EXPORT_BUTTON_W, 0)):
+        app.export_csv()
+    if imgui.is_item_hovered():
+        imgui.set_tooltip(
+            "Writes the curve as it is drawn - wavelength and per cent -\n"
+            "into captures/ as a two-column CSV."
         )
+
+    imgui.same_line()
+    if button("Export chart", ImVec2(CHART_BUTTON_W, 0)):
+        app.export_chart()
+    if imgui.is_item_hovered():
+        imgui.set_tooltip(
+            "Draws the curve as a finished picture into captures/:\n"
+            "PNG at 3840 x 2160 and SVG beside it, with the grid, the\n"
+            "colour strip, the edges of the visible range and every\n"
+            "identified line marked."
+        )
+
+
+def _mode_button(app: App) -> None:
+    """One button through the whole calibration: start, cancel, finish."""
+    size = ImVec2(MODE_BUTTON_W, 0)
+    if not app.calibrating:
+        if button("Calibrate Wavelength", size):
+            app.start_calibration()
+        if imgui.is_item_hovered():
+            imgui.set_tooltip(
+                "Turns on line identification.  Until it is on, the strips\n"
+                "ignore clicks, so nothing can be moved by accident."
+            )
+        return
+
+    if app.can_finish_calibration:
+        if button("Finish Calibration", size, BUTTON_GREEN, bold=True):
+            app.finish_calibration()
+        if imgui.is_item_hovered():
+            imgui.set_tooltip("Keeps the points and writes them to settings.json.")
+        return
+
+    if button("Cancel calibration", size, BUTTON_RED, bold=True):
+        app.cancel_calibration()
+    if imgui.is_item_hovered():
+        imgui.set_tooltip(
+            f"Throws away every click made since the mode was turned on.\n"
+            f"{app.POINTS_TO_FINISH} points are needed before it can be finished."
+        )
+
+
+def _wavelength_state(app: App, spectrum, cursor_x):
+    """Left field: what is under the cursor, or what to do next."""
+    if cursor_x is not None:
+        index = int(np.clip(round(app.index_of_x(cursor_x)), 0, spectrum.length - 1))
+        parts = [f"x {cursor_x:.1f} px"]
+        nanometres = app.wavelength_at(cursor_x)
+        if nanometres is not None:
+            parts.append(f"{nanometres:.2f} nm")
+        shown = app.spectrum_shown
+        if shown is not None and index < shown.size:
+            parts.append(f"{shown[index]:.1f} {app.spectrum_unit}")
+        if app.pending_nm is not None:
+            parts.append(f"-> pairs with {app.pending_nm:.2f} nm")
+        return (YELLOW if app.pending_pick else CYAN), "   ".join(parts)
+
+    if not app.reference.ok:
+        return RED, "no reference spectrum - run tools/fetch_reference.py"
+    if not app.calibrating:
+        return GREY, "not identifying lines"
+    if app.pending_nm is not None:
+        return YELLOW, f"{app.pending_nm:.2f} nm picked - click that line on our spectrum"
+    return YELLOW, "click a line on the reference strip"
+
+
+def _wavelength_summary(app: App):
+    """Right field: calibrated, or not. There is no third answer."""
+    count = len(app.anchors)
+    if app.calibrated:
+        solution = app.solution
+        return GREEN, (
+            f"calibrated: degree {solution.degree}, {count} points, "
+            f"rms {solution.rms_nm:.3f} nm"
+        )
+    if app.calibrating:
+        return YELLOW, f"not calibrated: {count} of {app.POINTS_TO_FINISH} points"
+    if count:
+        return YELLOW, f"not calibrated: {count} points, needs {app.POINTS_TO_FINISH}"
+    return GREY, "not calibrated"
 
 
 # ---------------------------------------------------------------------------

@@ -37,6 +37,91 @@ def saturation_value(full_scale: int) -> int:
     return int(math.ceil(full_scale * SATURATION_FRACTION))
 
 
+# ---------------------------------------------------------------------------
+# Wavelength to colour, for the illustrative strip under the spectrum
+# ---------------------------------------------------------------------------
+
+#: Where the eye gives up.  Between these the strip is spectral; outside it
+#: fades to magenta, the conventional stand-in for "no colour belongs here".
+VISIBLE_FROM_NM = 380.0
+VISIBLE_TO_NM = 780.0
+#: How far past the visible edge the fade to magenta is complete.
+FADE_SPAN_NM = 50.0
+#: Magenta at 30 per cent, what the strip shows where nothing is visible.
+INVISIBLE_RGB = (0.3, 0.0, 0.3)
+#: The usual display gamma for this approximation.
+COLOUR_GAMMA = 0.8
+
+
+def _spectral_rgb(nm: np.ndarray):
+    """Approximate sRGB of a monochromatic wavelength, each channel 0..1.
+
+    The piecewise fit every spectrum illustration uses; it is not colorimetry,
+    it just has to look like the rainbow everyone expects.
+    """
+    red = np.zeros(nm.shape)
+    green = np.zeros(nm.shape)
+    blue = np.zeros(nm.shape)
+
+    def band(low, high):
+        return (nm >= low) & (nm < high)
+
+    section = band(380.0, 440.0)
+    red[section] = -(nm[section] - 440.0) / 60.0
+    blue[section] = 1.0
+    section = band(440.0, 490.0)
+    green[section] = (nm[section] - 440.0) / 50.0
+    blue[section] = 1.0
+    section = band(490.0, 510.0)
+    green[section] = 1.0
+    blue[section] = -(nm[section] - 510.0) / 20.0
+    section = band(510.0, 580.0)
+    red[section] = (nm[section] - 510.0) / 70.0
+    green[section] = 1.0
+    section = band(580.0, 645.0)
+    red[section] = 1.0
+    green[section] = -(nm[section] - 645.0) / 65.0
+    section = band(645.0, 780.0 + 1e-6)
+    red[section] = 1.0
+
+    # The ends of the range are dim rather than absent.
+    fade = np.ones(nm.shape)
+    section = band(380.0, 420.0)
+    fade[section] = 0.3 + 0.7 * (nm[section] - 380.0) / 40.0
+    section = band(700.0, 780.0 + 1e-6)
+    fade[section] = 0.3 + 0.7 * (780.0 - nm[section]) / 80.0
+    return red * fade, green * fade, blue * fade
+
+
+def wavelength_rgba(nm: np.ndarray) -> np.ndarray:
+    """Packed RGBA for each wavelength; magenta where the eye sees nothing."""
+    nm = np.asarray(nm, dtype=np.float64)
+    inside = np.clip(nm, VISIBLE_FROM_NM, VISIBLE_TO_NM)
+    channels = _spectral_rgb(inside)
+
+    # Distance past the visible edge, 0 inside it and 1 once the fade is done.
+    beyond = np.maximum(VISIBLE_FROM_NM - nm, nm - VISIBLE_TO_NM)
+    mix = np.clip(beyond / FADE_SPAN_NM, 0.0, 1.0)
+    mix[~np.isfinite(nm)] = 1.0
+
+    packed = OPAQUE * np.ones(nm.shape, dtype=np.uint32)
+    for shift, (channel, target) in enumerate(zip(channels, INVISIBLE_RGB)):
+        blended = np.where(np.isfinite(channel), channel, 0.0) * (1.0 - mix) + target * mix
+        level = (np.clip(blended, 0.0, 1.0) ** COLOUR_GAMMA * 255.0 + 0.5).astype(np.uint32)
+        packed |= level << (8 * shift)
+    return packed
+
+
+def wavelength_image(nm: np.ndarray) -> np.ndarray:
+    """(1, N, 4) uint8 RGBA strip of these wavelengths, for matplotlib or PIL.
+
+    The same colours the strip on screen is built from - packed RGBA has R in the
+    low byte, so on a little-endian machine the bytes already sit in RGBA order.
+    """
+    packed = np.ascontiguousarray(wavelength_rgba(nm))
+    return packed.view(np.uint8).reshape(1, -1, 4)
+
+
 def mtf(x: np.ndarray, m: float) -> np.ndarray:
     """Midtones transfer function: (1-m)*x / (m + x*(1-2m)).
 

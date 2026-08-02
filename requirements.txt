@@ -4,7 +4,9 @@ pygame>=2.5
 PyOpenGL>=3.1.7
 PyOpenGL-accelerate>=3.1.7   # optional, speeds up texture uploads
 imgui-bundle>=1.92           # Dear ImGui 1.92 + the pygame python backend
+astropy>=6                   # FITS: saving and loading frames and darks
 pillow>=10                   # only used by main.py --screenshot
+matplotlib>=3.8              # only used by Export chart, imported on demand
 
 # The ZWO SDK itself is not a Python package: ASICamera2.dll comes from the
 # ZWO ASI Camera SDK (or an ASIStudio install).  See README.md.

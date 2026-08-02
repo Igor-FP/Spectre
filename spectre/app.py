@@ -5,12 +5,15 @@ from __future__ import annotations
 import math
 import os
 import time
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, replace
 from typing import List, Optional
 
 import numpy as np
 
-from . import asi_sdk, calib, camera as cam, display, frameio, reference, wavelength
+from . import (
+    asi_sdk, calib, camera as cam, chart, darks, display, frameio, reference, wavelength,
+)
 from .asi_sdk import ImgType
 from .camera import BANDWIDTH, EXPOSURE, GAIN, HIGH_SPEED, OFFSET
 from .settings import Settings
@@ -19,6 +22,9 @@ SIM_LABEL = "Simulator (no hardware)"
 
 ZOOM_MIN, ZOOM_MAX = 0.05, 32.0
 MIN_CROP = 16  # smallest crop the calibration can work with
+
+DARK_CONFIRM_POPUP = "Make dark"
+DARK_PROGRESS_POPUP = "Making dark"
 
 
 @dataclass
@@ -147,6 +153,25 @@ class App:
         self.strip_ratio = settings.spectrum_strip_ratio
         self.spectrum_status = ""
 
+        #: Running mean over the last N extracted spectra. Averaging the
+        #: spectrum rather than the frames costs a few kilobytes instead of
+        #: several megabytes each, and comes to the same thing: extraction is a
+        #: mean over the band, and a mean of means is a mean.
+        self.average_count = max(1, int(settings.spectrum_average))
+        self._history = deque(maxlen=self.average_count)
+        self._history_key = None  # span the history was collected over
+        self._history_frame = -1  # so one frame is never counted twice
+
+        #: Relative measurement: a spectrum kept aside, everything then read as
+        #: a per cent of it.  What a filter curve is made of.
+        self.baseline: Optional[np.ndarray] = None
+        self.baseline_first_column = 0.0
+        self.baseline_status = ""
+        #: What the graph and the readouts show, and the name of its unit.
+        self.spectrum_shown: Optional[np.ndarray] = None
+        self.spectrum_unit = "ADU"
+        self.export_status = ""
+
         # wavelength calibration: the reference strip under ours, and the points
         self.reference = reference.load()
         self.reference_texture = display.ImageTexture()
@@ -156,18 +181,51 @@ class App:
         self.reference_to_nm = settings.reference_to_nm
         self.max_degree = settings.wavelength_max_degree
         self.anchors = wavelength.anchors_from_settings(settings.wavelength_anchors)
-        self.solution: Optional[wavelength.Solution] = wavelength.from_settings(
-            settings.wavelength_coefficients,
-            settings.wavelength_x_ref,
-            settings.wavelength_x_scale,
+        self._anchor_serial = 1 + max((point.added for point in self.anchors), default=0)
+        #: Points numbered from here on were made in this session.  Undo only
+        #: reaches those: for a point read back from settings.json there is no
+        #: "last click" to take back.
+        self._session_serial = self._anchor_serial
+        # The points are what a calibration is; the formula in the file is only
+        # a cache of them.  Without enough points behind it, it is not restored -
+        # otherwise a leftover formula would come back looking calibrated.
+        self.solution: Optional[wavelength.Solution] = (
+            wavelength.from_settings(
+                settings.wavelength_coefficients,
+                settings.wavelength_x_ref,
+                settings.wavelength_x_scale,
+            )
+            if len(self.anchors) >= wavelength.POINTS_FOR_CALIBRATION
+            else None
         )
-        #: Half of an identification: one side has been clicked, waiting for the
-        #: other.  Either order works.
-        self.pending_x: Optional[float] = None
+        #: The strips only take clicks while this is on, and the points made are
+        #: held in memory until Finish - Cancel has to be able to put back
+        #: exactly what was there before.
+        self.calibrating = False
+        self._snapshot = None
+        #: First half of an identification: the reference has been clicked and we
+        #: are waiting for the same line on our spectrum.
         self.pending_nm: Optional[float] = None
         self.pending_ref_x: Optional[float] = None  # where that wavelength was clicked
+        self.colour_texture = display.ImageTexture()
         self.wavelength_status = ""
         self._solved_span = None  # spectrum span the current solution was made for
+
+        # dark frames: one master dark per gain/exposure, subtracted live
+        self.dark_maker = darks.DarkMaker()
+        self.use_dark = False
+        self.dark: Optional[np.ndarray] = None
+        self.dark_key = None  # (gain, exposure key) the loaded dark belongs to
+        self.dark_status = ""
+        #: Popup the UI should open on its next pass; consumed once.
+        self.dark_popup_request = ""
+        #: Gain/exposure the disk was last searched for a dark at, so the search
+        #: happens when they move and not on every frame.
+        self._known_key = None
+        #: Kept as the user set it even while a dark is doing the job instead;
+        #: when the dark goes, this comes back rather than having to be re-ticked.
+        self.use_bias = settings.use_bias
+        self.bias_level = settings.bias_level
 
         # saving frames
         self.save_fits = settings.save_fits
@@ -327,8 +385,9 @@ class App:
             return False
 
         started = time.perf_counter()
+        self.follow_dark_settings()
         if frame is not None:
-            self.frame = frame
+            self.frame = self.apply_dark(frame)
             self.ensure_crop(frame.width, frame.height)
         frame = self.frame
         region = self.cropped()
@@ -348,6 +407,117 @@ class App:
         self.displayed_frames += 1
         self.display_ms = (time.perf_counter() - started) * 1000.0
         return True
+
+    # -- dark frames -------------------------------------------------------
+
+    def current_dark_key(self):
+        """(gain, exposure key) the camera is set to right now, or None."""
+        if self.camera is None:
+            return None
+        return darks.dark_key(
+            self.control_value(GAIN, 0), self.control_value(EXPOSURE, 0)
+        )
+
+    def dark_on_disk(self) -> Optional[str]:
+        """The master dark matching the current settings, if there is one."""
+        if self.camera is None:
+            return None
+        return darks.find_dark(
+            self.control_value(GAIN, 0), self.control_value(EXPOSURE, 0)
+        )
+
+    def set_use_dark(self, on: bool) -> None:
+        """Turn subtraction on or off; loading the file is a one-off."""
+        if not on:
+            self.use_dark = False
+            self.dark = None
+            self.dark_key = None
+            return
+        path = self.dark_on_disk()
+        if path is None:
+            self.dark_status = "no dark for this gain and exposure"
+            return
+        try:
+            data, _ = frameio.load_frame(path)
+        except Exception as exc:
+            self.dark_status = f"{type(exc).__name__}: {exc}"
+            return
+        self.dark = data
+        self.dark_key = self.current_dark_key()
+        self.use_dark = True
+        self.dark_status = f"using {os.path.basename(path)}"
+
+    @property
+    def dark_applies(self) -> bool:
+        return self.use_dark and self.dark is not None
+
+    @property
+    def bias_applies(self) -> bool:
+        """The bias only stands in while no dark is doing the job."""
+        return self.use_bias and not self.dark_applies
+
+    def follow_dark_settings(self) -> None:
+        """Keep the tick in step with what is on disk for the current settings.
+
+        Run when the gain or the exposure has moved, and once at startup: if
+        there is a master dark for where they are now, it goes on; if there is
+        not, it goes off.  The disk is only looked at on a change, so unticking
+        the box by hand is not undone on the next frame.
+        """
+        key = self.current_dark_key()
+        if key is None or key == self._known_key:
+            return
+        self._known_key = key
+        if self.dark_on_disk() is not None:
+            self.set_use_dark(True)
+        elif self.use_dark:
+            self.set_use_dark(False)
+            self.dark_status = "no dark for these settings"
+
+    def apply_dark(self, frame: cam.Frame) -> cam.Frame:
+        """Take the dark off, or the flat bias level if there is no dark.
+
+        A dark only belongs to the gain and exposure it was taken at.  A frame
+        still in flight from before a slider moved is left alone rather than
+        corrected with the wrong picture; the tick itself is not touched here,
+        `follow_dark_settings` owns that.
+        """
+        if self.dark_applies:
+            if self.dark.shape != frame.data.shape:
+                self.set_use_dark(False)
+                self.dark_status = "dark does not match the frame size: switched off"
+            elif darks.dark_key(frame.gain, frame.exposure_us) == self.dark_key:
+                return replace(frame, data=darks.subtract(frame.data, self.dark))
+            else:
+                return frame  # exposed before the change: not ours to correct
+        if self.bias_applies and self.bias_level > 0:
+            return replace(frame, data=darks.subtract(frame.data, self.bias_level))
+        return frame
+
+    def start_dark_capture(self) -> None:
+        if self.camera is None:
+            self.dark_status = "connect a camera first"
+            return
+        self.dark_status = ""
+        if self.dark_maker.start(self.camera):
+            self.dark_popup_request = DARK_PROGRESS_POPUP
+
+    def cancel_dark_capture(self) -> None:
+        self.dark_maker.cancel()
+
+    def poll_dark_capture(self) -> None:
+        """Pick up a finished master dark and switch it on."""
+        error = self.dark_maker.take_error()
+        if error:
+            self.dark_status = error
+            return
+        result = self.dark_maker.take_result()
+        if result is None:
+            return
+        path, gain, exposure_us = result
+        self.dark_status = f"made {os.path.basename(path)}"
+        # It was made for what the camera is set to now, so use it.
+        self.set_use_dark(True)
 
     @property
     def saturation_value(self) -> int:
@@ -564,6 +734,7 @@ class App:
         if not spectrum.ok:
             self.spectrum = None
             return
+        spectrum.values = self._averaged(spectrum)
         self.spectrum = spectrum
         # The strip is shown on its own scale: these are means over the band, not
         # raw pixel values, so the image stretch does not apply to them.
@@ -574,7 +745,166 @@ class App:
         self.spectrum_texture.update(
             np.ascontiguousarray(scaled.astype(np.uint8)).reshape(1, -1)
         )
+        self.refresh_display()
         self.refresh_wavelength(force=False)
+
+    # -- averaging over the last N spectra ---------------------------------
+
+    def set_average_count(self, count: int) -> None:
+        """How many spectra to average. 1 is off; the history keeps what it can."""
+        count = max(1, min(int(count), 500))
+        if count == self.average_count:
+            return
+        self.average_count = count
+        kept = list(self._history)[-count:]
+        self._history = deque(kept, maxlen=count)
+        self.save_state()
+
+    def _averaged(self, spectrum) -> np.ndarray:
+        """The mean of the last N spectra, or this one when N is 1.
+
+        The history is thrown away whenever the spectrum stops covering the same
+        columns - a moved crop or a re-measured band - because averaging two
+        spectra that are not on the same axis would smear the lines rather than
+        the noise.
+        """
+        key = (spectrum.length, spectrum.first_column)
+        if key != self._history_key:
+            self._history.clear()
+            self._history_key = key
+        if spectrum.frame_index != self._history_frame:
+            self._history.append(spectrum.values)
+            self._history_frame = spectrum.frame_index
+        if self.average_count <= 1 or len(self._history) <= 1:
+            return spectrum.values
+        return np.mean(np.stack(self._history), axis=0, dtype=np.float64).astype(np.float32)
+
+    @property
+    def averaged_over(self) -> int:
+        """How many spectra the current curve is actually a mean of."""
+        return max(1, len(self._history)) if self.average_count > 1 else 1
+
+    # -- relative measurement ---------------------------------------------
+
+    def refresh_display(self) -> None:
+        """What the graph, the readouts and the export show.
+
+        Always a per cent: of the comparison spectrum when one is set, of the
+        brightest sample otherwise.  The curve has the same shape either way -
+        both are a linear rescale - so only the unit changes.
+        """
+        spectrum = self.spectrum
+        if spectrum is None or not spectrum.ok or spectrum.length == 0:
+            self.spectrum_shown = None
+            return
+        values = spectrum.values.astype(np.float64)
+        if self.baseline is None:
+            peak = float(values.max())
+            shown = 100.0 * values / peak if peak > 0 else np.zeros_like(values)
+            self.spectrum_unit = "% of peak"
+        else:
+            shown = 100.0 * values / self._aligned_baseline(spectrum)
+            self.spectrum_unit = "% of baseline"
+        self.spectrum_shown = shown.astype(np.float32)
+
+    def _aligned_baseline(self, spectrum) -> np.ndarray:
+        """The comparison spectrum on the current spectrum's columns.
+
+        Lined up by frame column rather than by index, so moving the crop
+        between the two exposures does not silently shift one against the other.
+        """
+        first = self.x_of_index(0)
+        if spectrum.length == self.baseline.size and abs(first - self.baseline_first_column) < 0.5:
+            self.baseline_status = ""
+            return self.baseline
+        self.baseline_status = "baseline covers a different span: interpolated onto this one"
+        columns = np.arange(spectrum.length, dtype=np.float64) + first
+        base_columns = np.arange(self.baseline.size, dtype=np.float64) + self.baseline_first_column
+        return np.interp(columns, base_columns, self.baseline)
+
+    def set_baseline(self) -> None:
+        """Keep the current spectrum aside as the one everything is divided by."""
+        spectrum = self.spectrum
+        if spectrum is None or not spectrum.ok or spectrum.length == 0:
+            self.baseline_status = "no spectrum to take as a baseline"
+            return
+        values = spectrum.values.astype(np.float64)
+        # Zero and below become one, so the division always has something to
+        # divide by.  Interpolation between clamped samples stays >= 1 as well.
+        self.baseline = np.where(values <= 0.0, 1.0, values)
+        self.baseline_first_column = self.x_of_index(0)
+        self.baseline_status = f"baseline taken from frame {spectrum.frame_index}"
+        self.refresh_display()
+
+    def clear_baseline(self) -> None:
+        self.baseline = None
+        self.baseline_status = ""
+        self.refresh_display()
+
+    def _export_pieces(self):
+        """(columns, wavelengths or None, notes) shared by both exports."""
+        spectrum = self.spectrum
+        columns = np.arange(spectrum.length, dtype=np.float64) + self.x_of_index(0)
+        wavelengths = self.solution.lambda_of_x(columns) if self.calibrated else None
+        notes = [
+            f"unit: {self.spectrum_unit}",
+            f"band {spectrum.band_angle_deg:+.4f} deg, lines {spectrum.line_tilt_deg:+.4f} deg",
+            f"averaged over {spectrum.rows_averaged} rows",
+        ]
+        if self.averaged_over > 1:
+            notes.append(f"mean of the last {self.averaged_over} spectra")
+        if self.calibrated:
+            notes.append(self.solution.describe())
+        if self.baseline is not None:
+            notes.append("values are per cent of a comparison spectrum")
+        return columns, wavelengths, notes
+
+    def export_csv(self) -> None:
+        """Write the curve as it is drawn: wavelength and per cent."""
+        if self.spectrum is None or self.spectrum_shown is None:
+            self.export_status = "no spectrum to export"
+            return
+        columns, wavelengths, notes = self._export_pieces()
+        try:
+            path = frameio.save_spectrum_csv(
+                columns, self.spectrum_shown, wavelengths, self.spectrum_unit, notes
+            )
+        except Exception as exc:
+            self.export_status = f"{type(exc).__name__}: {exc}"
+            return
+        self.export_status = f"exported {os.path.basename(path)}"
+
+    def export_chart(self) -> None:
+        """Write the curve as a picture: PNG at 4K and SVG beside it."""
+        if self.spectrum is None or self.spectrum_shown is None:
+            self.export_status = "no spectrum to export"
+            return
+        columns, wavelengths, notes = self._export_pieces()
+        stem = os.path.join(
+            frameio.CAPTURE_DIR, frameio.timestamped_name("spectrum")
+        )
+        os.makedirs(frameio.CAPTURE_DIR, exist_ok=True)
+        title = "Spectre - " + os.path.basename(stem).replace("spectrum_", "")
+        if self.averaged_over > 1:
+            title += f", mean of {self.averaged_over} spectra"
+        try:
+            written = chart.export(
+                stem,
+                wavelengths if self.calibrated else columns,
+                self.spectrum_shown,
+                self.spectrum_unit,
+                calibrated=self.calibrated,
+                anchors=self.anchors,
+                title=title,
+                notes=notes,
+                relative=self.baseline is not None,
+            )
+        except Exception as exc:
+            self.export_status = f"{type(exc).__name__}: {exc}"
+            return
+        self.export_status = "exported " + ", ".join(
+            os.path.basename(path) for path in written
+        )
 
     # -- wavelength calibration --------------------------------------------
 
@@ -623,15 +953,21 @@ class App:
 
         Our spectrum is never touched: the reference is evaluated at the
         wavelength each of our columns maps to, so both strips share one X axis
-        and the lines line up vertically when the calibration is right.
+        and the lines line up vertically when the calibration is right.  The
+        illustrative colour bar comes off the same wavelengths.
         """
         spectrum = self.spectrum
         solution = self.solution
-        if spectrum is None or solution is None or not solution.ok or not self.reference.ok:
+        if spectrum is None or solution is None or not solution.ok:
             return
         wavelengths = solution.lambda_of_x(
             np.arange(spectrum.length, dtype=np.float64) + self.x_of_index(0)
         )
+        self.colour_texture.update(
+            np.ascontiguousarray(display.wavelength_rgba(wavelengths)).reshape(1, -1)
+        )
+        if not self.reference.ok:
+            return
         values = self.reference.sample(wavelengths, self.reference_blur_nm)
         inside = np.isfinite(values)
         scaled = np.zeros(values.shape, dtype=np.float32)  # off the atlas: black
@@ -650,60 +986,184 @@ class App:
             return None
         return float(self.solution.lambda_of_x(float(x_px)))
 
-    def pick_our_spectrum(self, x_px: float) -> None:
-        """Half of an identification: this column of our spectrum."""
-        self.pending_x = float(x_px)
-        self._commit_pending()
+    # -- the two clicks that make one point -------------------------------
+    #
+    # Always the reference first, then our spectrum.  The order is fixed on
+    # purpose: the yellow line appears on the reference and nowhere else, so
+    # there is only ever one place to click next.
 
     def pick_reference(self, x_px: float) -> None:
-        """The other half: the wavelength the reference strip shows at this column.
+        """First click: the wavelength the reference strip shows at this column.
 
         The wavelength comes from the same mapping the strip was drawn with, so
         it is exactly the feature under the cursor whatever the mapping is
         currently worth.
         """
+        if not self.calibrating or self.pending_nm is not None:
+            return
         value = self.wavelength_at(x_px)
         if value is None:
             return
         self.pending_nm = value
         self.pending_ref_x = float(x_px)
-        self._commit_pending()
 
-    def _commit_pending(self) -> None:
-        if self.pending_x is None or self.pending_nm is None:
+    def pick_our_spectrum(self, x_px: float) -> None:
+        """Second click: the column of our spectrum that same line sits at."""
+        if not self.calibrating or self.pending_nm is None:
             return
-        self.add_anchor(self.pending_x, self.pending_nm)
-        self.pending_x = self.pending_nm = self.pending_ref_x = None
+        self.add_anchor(float(x_px), self.pending_nm)
+        self.cancel_pending()
+
+    # -- entering and leaving the calibration ------------------------------
+
+    #: Points needed before the calibration exists at all.
+    POINTS_TO_FINISH = wavelength.POINTS_FOR_CALIBRATION
+
+    def start_calibration(self) -> None:
+        """Turn on the mode, remembering what to go back to if it is cancelled."""
+        if self.calibrating:
+            return
+        s = self.settings
+        self._snapshot = (
+            [replace(point) for point in self.anchors],
+            list(s.wavelength_coefficients),
+            s.wavelength_x_ref,
+            s.wavelength_x_scale,
+            s.wavelength_valid,
+        )
+        self.calibrating = True
+        self.show_reference = True  # there is nothing to click on without it
+        self.cancel_pending()
+
+    @property
+    def can_finish_calibration(self) -> bool:
+        return self.calibrating and len(self.anchors) >= self.POINTS_TO_FINISH
+
+    def finish_calibration(self) -> None:
+        """Keep the points made and write them out."""
+        self.calibrating = False
+        self._snapshot = None
+        self.cancel_pending()
+        self.refresh_wavelength()
+        self.save_state()
+
+    def cancel_calibration(self) -> None:
+        """Leave the mode and put back what was there before it started."""
+        if self._snapshot is not None:
+            anchors, coefficients, x_ref, x_scale, valid = self._snapshot
+            self.anchors = anchors
+            self._store_snapshot_settings(coefficients, x_ref, x_scale, valid)
+        self._snapshot = None
+        self.calibrating = False
+        self.cancel_pending()
+        self.refresh_wavelength()
+        # Nothing was written while the mode was on, so the file already holds
+        # what we have just gone back to.
+
+    def _store_snapshot_settings(self, coefficients, x_ref, x_scale, valid) -> None:
+        s = self.settings
+        s.wavelength_coefficients = list(coefficients)
+        s.wavelength_x_ref = float(x_ref)
+        s.wavelength_x_scale = float(x_scale)
+        s.wavelength_valid = bool(valid)
 
     def add_anchor(self, x_px: float, wavelength_nm: float) -> None:
         label = self.reference.nearest_label(wavelength_nm) if self.reference.ok else ""
-        self.anchors.append(wavelength.Anchor(float(x_px), float(wavelength_nm), label))
+        self.anchors.append(
+            wavelength.Anchor(float(x_px), float(wavelength_nm), label, self._anchor_serial)
+        )
+        self._anchor_serial += 1
         self.anchors.sort(key=lambda point: point.x_px)
         self.refresh_wavelength()
+        self._save_unless_calibrating()
 
     def remove_anchor(self, index: int) -> None:
         if 0 <= index < len(self.anchors):
             del self.anchors[index]
             self.refresh_wavelength()
+            self._save_unless_calibrating()
 
-    def clear_anchors(self) -> None:
+    def _save_unless_calibrating(self) -> None:
+        """While the mode is on the points are a draft; Finish is what writes."""
+        if not self.calibrating:
+            self.save_state()
+
+    @property
+    def pending_pick(self) -> bool:
+        return self.pending_nm is not None
+
+    def _session_anchors(self) -> List[int]:
+        """Indices of the points made since the program started."""
+        return [
+            index
+            for index, point in enumerate(self.anchors)
+            if point.added >= self._session_serial
+        ]
+
+    @property
+    def can_undo_wavelength(self) -> bool:
+        """True only while there is a click of this session left to take back."""
+        return self.pending_pick or bool(self._session_anchors())
+
+    @property
+    def can_reset_wavelength(self) -> bool:
+        """Reset does reach a calibration read back from settings.json."""
+        return bool(self.anchors) or self.pending_pick or bool(
+            self.settings.wavelength_coefficients
+        )
+
+    def undo_wavelength(self) -> None:
+        """Take back the last click: the half-made pair first, then the last point."""
+        if self.pending_pick:
+            self.cancel_pending()
+            return
+        made_here = self._session_anchors()
+        if made_here:
+            self.remove_anchor(max(made_here, key=lambda i: self.anchors[i].added))
+
+    def reset_wavelength(self) -> None:
+        """Drop the wavelength calibration only, and leave the mode if it is on.
+
+        The band angle, the shear and the extracted spectrum are left alone: they
+        are a different calibration and re-measuring them is expensive.
+        """
         self.anchors = []
+        self.calibrating = False
+        self._snapshot = None
         self.cancel_pending()
+        self._store_snapshot_settings([], 0.0, 1.0, False)
         self.refresh_wavelength()
+        self.save_state()
 
     def cancel_pending(self) -> None:
-        self.pending_x = self.pending_nm = self.pending_ref_x = None
+        self.pending_nm = self.pending_ref_x = None
+
+    @property
+    def calibrated(self) -> bool:
+        """Either the calibration is complete, or there is none. No middle."""
+        solution = self.solution
+        return (
+            len(self.anchors) >= wavelength.POINTS_FOR_CALIBRATION
+            and solution is not None
+            and solution.ok
+            and solution.kind == "fit"
+        )
 
     def _store_solution(self) -> None:
         s = self.settings
         solution = self.solution
         s.wavelength_anchors = [point.as_dict() for point in self.anchors]
-        fitted = solution is not None and solution.ok and solution.kind == "fit"
-        s.wavelength_valid = bool(fitted)
-        if fitted:
+        s.wavelength_valid = self.calibrated
+        if self.calibrated:
             s.wavelength_coefficients = [float(c) for c in solution.coefficients]
             s.wavelength_x_ref = float(solution.x_ref)
             s.wavelength_x_scale = float(solution.x_scale)
+        else:
+            # A formula with too few points behind it must not survive in the
+            # file: it would come back next launch looking like a finished job.
+            s.wavelength_coefficients = []
+            s.wavelength_x_ref = 0.0
+            s.wavelength_x_scale = 1.0
 
     def _store_band(self, result: calib.BandResult) -> None:
         s = self.settings
@@ -725,10 +1185,25 @@ class App:
 
     # -- shutdown ----------------------------------------------------------
 
+    def save_state(self) -> None:
+        """Write settings.json now, without touching the camera.
+
+        Anchor points are made by hand, one line at a time; losing a session of
+        them to a crash or a power cut would be worse than the cost of writing a
+        two-kilobyte file on every click.
+        """
+        self._store_ui_state()
+        self.settings.save()
+
     def save_settings(self) -> None:
-        s = self.settings
         if self.camera is not None:
             self._store_controls(self.camera)
+        self._store_ui_state()
+        self.settings.save()
+
+    def _store_ui_state(self) -> None:
+        """Copy everything the UI owns into the settings object."""
+        s = self.settings
         s.auto_stretch = self.stretch.auto
         s.black = self.stretch.black
         s.white = self.stretch.white
@@ -743,9 +1218,12 @@ class App:
         s.save_fits = self.save_fits
         s.save_npy = self.save_npy
         s.save_full_frame = self.save_full_frame
+        s.use_bias = self.use_bias
+        s.bias_level = self.bias_level
         s.show_spectrum = self.show_spectrum
         s.spectrum_height = self.spectrum_height
         s.spectrum_strip_ratio = self.strip_ratio
+        s.spectrum_average = self.average_count
         s.show_reference = self.show_reference
         s.reference_blur_nm = self.reference_blur_nm
         s.reference_from_nm = self.reference_from_nm
@@ -760,13 +1238,14 @@ class App:
         s.band_hi_percentile = p.hi_percentile
         s.band_smooth_window = p.smooth_window
         s.shear_blur_scale = self.shear_params.blur_scale
-        s.save()
 
     def shutdown(self) -> None:
         self.band_finder.cancel()
         self.shear_finder.cancel()
+        self.dark_maker.cancel()
         self.save_settings()
         self.disconnect()
         self.texture.release()
         self.spectrum_texture.release()
         self.reference_texture.release()
+        self.colour_texture.release()

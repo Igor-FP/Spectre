@@ -116,6 +116,41 @@ def _write_fits(path: str, data: np.ndarray, meta: FrameMeta, when: datetime) ->
     hdu.writeto(path, overwrite=True)
 
 
+def save_spectrum_csv(
+    columns,
+    values,
+    wavelengths=None,
+    unit: str = "%",
+    notes=(),
+    directory: str = CAPTURE_DIR,
+) -> str:
+    """Write the 1-D curve as CSV: wavelength (or column) against per cent.
+
+    Two data columns, the same pair the graph draws.  Without a wavelength
+    calibration the first one is the frame column instead, named as such rather
+    than left blank.
+    """
+    import numpy as np
+
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, timestamped_name("spectrum") + ".csv")
+    calibrated = wavelengths is not None
+    axis = np.asarray(wavelengths if calibrated else columns, dtype=float)
+    values = np.asarray(values, dtype=float)
+    with open(path, "w", encoding="ascii", newline="\n") as handle:
+        handle.write("# Spectre 1-D spectrum\n")
+        for note in notes:
+            handle.write(f"# {note}\n")
+        if not calibrated:
+            handle.write("# no wavelength calibration: the axis is the frame column\n")
+        handle.write(
+            "wavelength_nm,percent\n" if calibrated else "x_px,percent\n"
+        )
+        for position, value in zip(axis, values):
+            handle.write(f"{position:.4f},{value:.4f}\n")
+    return path
+
+
 def list_captures(directory: str = CAPTURE_DIR) -> list:
     """Saved frames, newest first."""
     try:

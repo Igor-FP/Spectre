@@ -11,6 +11,7 @@ Two implementations share `BaseCamera`:
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -42,6 +43,55 @@ _SDK_CONTROL = {
 #: mode, which is what ZWO recommends for long exposures and lets us abort a
 #: running exposure when the user moves a slider.
 SNAP_THRESHOLD_US = 1_000_000
+
+
+# ---------------------------------------------------------------------------
+# The exposure scale
+# ---------------------------------------------------------------------------
+#
+# 1 ms at one end, 1 s exactly in the middle, 10 minutes at the other. Each half
+# is logarithmic on its own, because a single logarithmic scale always puts
+# sqrt(min*max) in the middle - 775 ms here - and no choice of base changes
+# that, the base cancels. The two halves span 3.00 and 2.78 decades, so the kink
+# in the middle is not noticeable.
+#
+# This lives here rather than in the UI because it is not only a slider: a dark
+# frame is filed under its position on this scale, and that name must not depend
+# on a widget.
+
+EXPOSURE_SCALE_MIN_MS = 1.0
+EXPOSURE_SCALE_MID_MS = 1000.0
+EXPOSURE_SCALE_MAX_MS = 600_000.0
+
+
+def exposure_position(exposure_ms: float) -> float:
+    """Exposure in milliseconds -> position on the scale, 0..1."""
+    exposure_ms = min(max(float(exposure_ms), EXPOSURE_SCALE_MIN_MS), EXPOSURE_SCALE_MAX_MS)
+    if exposure_ms <= EXPOSURE_SCALE_MID_MS:
+        span = math.log(EXPOSURE_SCALE_MID_MS / EXPOSURE_SCALE_MIN_MS)
+        return 0.5 * math.log(exposure_ms / EXPOSURE_SCALE_MIN_MS) / span
+    span = math.log(EXPOSURE_SCALE_MAX_MS / EXPOSURE_SCALE_MID_MS)
+    return 0.5 + 0.5 * math.log(exposure_ms / EXPOSURE_SCALE_MID_MS) / span
+
+
+def exposure_from_position(position: float) -> float:
+    """Position on the scale, 0..1 -> exposure in milliseconds."""
+    position = min(max(float(position), 0.0), 1.0)
+    if position <= 0.5:
+        ratio = EXPOSURE_SCALE_MID_MS / EXPOSURE_SCALE_MIN_MS
+        return EXPOSURE_SCALE_MIN_MS * ratio ** (position / 0.5)
+    ratio = EXPOSURE_SCALE_MAX_MS / EXPOSURE_SCALE_MID_MS
+    return EXPOSURE_SCALE_MID_MS * ratio ** ((position - 0.5) / 0.5)
+
+
+def exposure_key(exposure_us: int) -> int:
+    """Position on the scale as a whole per cent, 0..100.
+
+    What a dark frame is filed under, together with the gain.  Rounding to a
+    per cent puts exposures within about 1.4 % of each other in the same bucket,
+    which is far finer than the dark current cares about.
+    """
+    return int(round(100.0 * exposure_position(float(exposure_us) / 1000.0)))
 
 
 @dataclass(frozen=True)

@@ -266,10 +266,64 @@ dropped.
 
 The window shows a strip in which the brightness of a point is the value of the
 spectrum (its height defaults to 1/20 of its width and can be dragged by the
-handle underneath), and below it the same spectrum as a plot. There are no labels
-on the X axis yet - there is no wavelength calibration. The height of the window
-itself is dragged by the handle on its top edge. While the window is open the
-spectrum is re-extracted from every new frame.
+handle underneath), and below it the same spectrum as a plot. The height of the
+window itself is dragged by the handle on its top edge. While the window is open
+the spectrum is re-extracted from every new frame.
+
+**Average N** under the plot means the last N spectra are averaged - a plain
+arithmetic mean - before anything is shown or written out. 1 is off. The history
+is dropped whenever the spectrum stops covering the same columns, because
+averaging across a moved crop would smear the lines rather than the noise.
+
+## Wavelength calibration
+
+The reference solar spectrum (Delbouille, Neven & Roland 1972, served by
+BASS2000) lives in `data/solar_reference.csv`, 300-1130 nm at 0.1 nm; fetch or
+refresh it with `python tools/fetch_reference.py`. It is drawn as a second strip
+flush under ours, blurred to the instrument's resolution and **resampled into our
+pixel columns** - the measured spectrum is never resampled.
+
+**Calibrate Wavelength** turns on line identification; until it is on, the strips
+ignore clicks. Click a line on the reference (a yellow line follows the cursor
+there), then the same line on our spectrum (a green one follows there, joined to
+the first by a sloped segment showing what is being tied to what). Three points
+finish it. Undo takes back the last click of the session, Reset drops the lot.
+Points and the fitted polynomial are kept in `settings.json`; a calibration is
+either complete or absent, never half of one.
+
+Once it stands: a wavelength scale under the plot, a colour strip showing the
+visible range, and a cursor line running through the strips and the graph
+together. Details and the open question of polynomial against a physical model
+are in [docs/TZ_Wavelength.md](docs/TZ_Wavelength.md).
+
+## Relative measurement, and getting the curve out
+
+**Set baseline** keeps the current spectrum aside; everything is then read as a
+per cent of it. Take one without the filter, put the filter in, and the graph is
+its transmission curve. Zero and below in the baseline count as one so the
+division always has something to divide by, and the graph is pinned to 0..100 %
+because anything above the baseline is noise. Without a baseline the values are
+per cent of the brightest sample.
+
+**Export CSV** writes two columns, wavelength and per cent. **Export chart**
+draws the same curve as a picture - PNG at 3840x2160 and SVG beside it, with the
+grid, the colour strip under the axis, the edges of the visible range and every
+identified line marked. Both land in `captures/`.
+
+## Dark frames
+
+**Make Dark** takes seven covered frames at the current gain and exposure,
+medians them and files the result as `darks/dark_<gain>_<exposure key>.fit`,
+where the key is the position on the exposure scale in whole per cent. Seven is
+odd on purpose: the median of an even count averages the two middle samples and
+would break the 16 ADU step of a 12-bit sensor read as RAW16.
+
+**Use dark** follows what is on disk: it comes on by itself at startup and
+whenever the gain or exposure lands on a combination that has one, and goes off
+when it does not. **Use bias** stands in when there is no dark, taking a flat
+level off every frame; it is off by default, and note that subtracting a pedestal
+makes relative measurement meaningless wherever there is no light - the ratio
+becomes noise divided by noise.
 
 ## Hardware notes (measured on this machine)
 
@@ -287,5 +341,8 @@ spectrum is re-extracted from every new frame.
 
 ## Next
 
-Identifying lines in the solar spectrum: the zero point of the X axis on screen
-and the scale along X, i.e. tying the spectrum to wavelength.
+Which model the X -> wavelength mapping should be. A polynomial is what is
+implemented; whether the physical grating formula describes this instrument
+better is still open, and cannot be settled until there is a frame with enough
+identified lines to hold points back from the fit and measure the residuals on
+them. See [docs/TZ_Wavelength.md](docs/TZ_Wavelength.md).

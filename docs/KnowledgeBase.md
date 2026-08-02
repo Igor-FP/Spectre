@@ -111,11 +111,58 @@ Every item here was measured on the frames in `captures/`.
   through `\\wsl.localhost\<distro>\...`, so a test script can live in a scratch
   directory outside the repository.
 
+## Dark frames
+
+* A dark is only valid for the gain and exposure it was taken at, so that is what
+  names it: `darks/dark_<gain>_<exposure key>.fit`. The exposure key is the
+  position on the exposure scale in whole per cent, 1 ms = 0, 1 s = 50, 10 min =
+  100. **The formula lives in `camera.py`, not in the UI**, exactly so that a
+  file name cannot depend on a widget; the slider now calls the same functions.
+  Bucketing to a per cent puts exposures within about 1.4 % in the same file.
+* **Combine an odd number of frames.** The median of an even count averages the
+  two middle samples, and a 12-bit sensor read as RAW16 comes back in steps of
+  16 - averaging two of them lands on a multiple of 8 and quietly breaks the
+  invariant the clipping test relies on. `DARK_FRAME_COUNT` is 7.
+* `np.partition(stack, N//2, axis=0)[N//2]` is the median without numpy's promotion
+  of the whole stack to float64 - which on a full-frame stack of 7 would be
+  120 MB of temporaries for nothing.
+* The master dark is a **whole frame**, never a crop: the crop moves, the dark
+  cannot follow it.
+
+## Plotting and pictures
+
+* **`PlotLines` puts up its own tooltip** with the two ends of the segment under
+  the cursor, in raw units, and there is no flag to turn it off. A `set_tooltip`
+  called after it replaces it - ImGui's `SetTooltip` overrides a previous tooltip
+  in the same frame.
+* **`PlotLines` insets the curve by `frame_padding`**, 4 px each side by default,
+  so a graph drawn under a strip of the same width does not line up with it.
+  Pushing `StyleVar_.frame_padding` to zero fixes it. What is left is a one-pixel
+  difference at the ends: the strips place sample i at `(i+0.5)/N` of the width,
+  ImGui places it at `i/(N-1)`.
+* **matplotlib must be forced onto the Agg backend** before `pyplot` is imported,
+  and imported inside the function that needs it. Otherwise it can try to open a
+  window of its own next to the live OpenGL one, and it costs about a second to
+  import at startup for nothing.
+* A drag widget (`drag_int`, `drag_float`) is indistinguishable from a button in
+  this theme and needs a ctrl-click to type into. Numbers to be typed get an
+  `input_int` with the label drawn beside it.
+
 ## Reference solar spectrum
 
-* **BASS2000 caps one request at 1000 A**, so 300-1000 nm takes seven of them.
+* **BASS2000 caps one request at 1000 A**, so 300-1130 nm takes nine of them.
   Neighbouring chunks repeat their shared end point - deduplicate by wavelength.
   `resol` is the output step in angstroms and the server resamples to it.
+* The service goes **well past 1000 nm** - at least to 1320 nm, where the visible
+  atlas hands over to Delbouille, Roland, Brault & Testerman (1981). The join is
+  clean: continuum 9860 just below 1000 nm against 9919 just above, 0.6 % apart.
+* **The grid is not perfectly uniform.** The server inserts one extra sample at
+  the exact catalogue wavelength of every labelled line, off the 0.1 nm grid -
+  35 steps out of 8316 differ, the smallest being 0.004 nm. It stays strictly
+  increasing, so interpolation is unaffected; the Gaussian blur treats samples as
+  evenly spaced, so a labelled line is weighted about 2 % heavier than it should
+  be at its own centre.  Cosmetic at these resolutions, but it is why the file is
+  not the clean 0.1 nm ladder it looks like.
 * **The response is UTF-8, not ASCII**: the hydrogen labels come as `Halpha`,
   `Hbeta`... spelled with real Greek letters, and G-prime with a real prime.
   Decoding the body as ASCII destroys them before they can be transliterated -

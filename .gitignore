@@ -220,6 +220,7 @@ __marimo__/
 # --- Spectre ---
 # Test frames captured from the camera (FITS/NumPy, tens of MB each)
 captures/
+darks/
 *.fits
 *.fit
 *.npy

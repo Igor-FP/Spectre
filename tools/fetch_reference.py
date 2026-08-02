@@ -5,9 +5,13 @@ serving the atlas of Delbouille, Neven & Roland (1972), Jungfraujoch, disc
 centre.  The service caps one request at 1000 A, so the range is fetched in
 chunks and stitched together.
 
-    python tools/fetch_reference.py                  # 300-1000 nm, 0.1 nm step
+    python tools/fetch_reference.py                  # 300-1130 nm, 0.1 nm step
     python tools/fetch_reference.py --step-nm 0.05
     python tools/fetch_reference.py --out other.csv
+
+The default upper end is past the silicon cutoff of the camera on purpose, so
+the near-infrared anchors are all there: the telluric O2 A band at 760 nm and
+the Ca II pair at 854 and 866 nm.
 
 The output is the CSV `spectre/reference.py` expects: wavelength in nm,
 intensity normalised to the continuum, and the line label the service gives
@@ -85,7 +89,7 @@ def parse(text: str):
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--from-nm", type=float, default=300.0)
-    parser.add_argument("--to-nm", type=float, default=1000.0)
+    parser.add_argument("--to-nm", type=float, default=1130.0)
     parser.add_argument(
         "--step-nm", type=float, default=0.1, help="output sampling step, nm (default 0.1)"
     )

@@ -78,17 +78,20 @@ spectre/asi_sdk.py       ctypes binding of ASICamera2.dll (from ASICamera2.h, SD
 spectre/camera.py        grabber thread; AsiCamera (video/snap), FileCamera, SimulatedCamera
 spectre/display.py       display stretch (LUT), frame statistics, GL texture
 spectre/imgui_backend.py pygame backend for ImGui with the full keyboard mapped
+spectre/darks.py         master dark: median of N covered frames, live subtraction
 spectre/calib.py         ALL geometry: band angle, shear, spectrum extraction
 spectre/reference.py     reference solar spectrum: blur, resample into our pixels
 spectre/wavelength.py    anchor points and the X -> wavelength polynomial
-spectre/frameio.py       saving and loading frames (FITS + .npy)
+spectre/chart.py         the curve as a finished picture (matplotlib, PNG + SVG)
+spectre/frameio.py       saving and loading frames (FITS + .npy), CSV export
 spectre/app.py           application state, connection, frame pipeline
 spectre/ui.py            ImGui panels, overlays, keyboard
 spectre/settings.py      settings.json
 tools/probe_camera.py    camera diagnostics from the console
 tools/fetch_reference.py downloads data/solar_reference.csv from BASS2000
-data/solar_reference.csv reference solar spectrum, 300-1000 nm at 0.1 nm
+data/solar_reference.csv reference solar spectrum, 300-1130 nm at 0.1 nm
 captures/                frames saved by the S key / Save frame
+darks/                   master darks, dark_<gain>_<exposure key>.fit
 ```
 
 ## Run

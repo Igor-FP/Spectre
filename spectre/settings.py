@@ -34,6 +34,12 @@ class Settings:
     lo_percentile: float = 0.2
     hi_percentile: float = 99.9
 
+    # dark / bias correction
+    #: With no dark for the current gain and exposure, a flat level is taken off
+    #: instead, so that ratios between ADU values stay honest.
+    use_bias: bool = False
+    bias_level: int = 2000
+
     # saving frames
     save_fits: bool = True
     save_npy: bool = True
@@ -72,6 +78,8 @@ class Settings:
 
     # extracted spectrum window
     show_spectrum: bool = False
+    #: Spectra averaged together before anything is shown or exported. 1 = off.
+    spectrum_average: int = 1
     spectrum_height: float = 300.0
     spectrum_strip_ratio: float = 20.0
 

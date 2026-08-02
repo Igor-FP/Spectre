@@ -25,6 +25,13 @@ import numpy as np
 #: click noise rather than the dispersion.
 MAX_DEGREE = 3
 
+#: A calibration is either complete or it does not exist - there is no half of
+#: one.  Below this many points nothing is stored, nothing is restored, and
+#: nothing downstream is allowed to call itself calibrated.  Fewer points still
+#: give a mapping to draw the reference with while it is being made; that is a
+#: working sketch, not a calibration.
+POINTS_FOR_CALIBRATION = 3
+
 
 @dataclass
 class Anchor:
@@ -33,9 +40,18 @@ class Anchor:
     x_px: float  # full-frame column
     wavelength_nm: float
     label: str = ""
+    #: Order the point was made in.  The list is kept sorted by column for the
+    #: table, so this is the only way back to "the one added last" for undo, and
+    #: it is saved so that undo still means that after a restart.
+    added: int = 0
 
     def as_dict(self) -> dict:
-        return {"x_px": float(self.x_px), "nm": float(self.wavelength_nm), "label": self.label}
+        return {
+            "x_px": float(self.x_px),
+            "nm": float(self.wavelength_nm),
+            "label": self.label,
+            "added": int(self.added),
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> "Anchor":
@@ -43,6 +59,7 @@ class Anchor:
             x_px=float(data.get("x_px", 0.0)),
             wavelength_nm=float(data.get("nm", 0.0)),
             label=str(data.get("label", "")),
+            added=int(data.get("added", 0)),
         )
 
 
